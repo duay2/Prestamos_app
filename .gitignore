@@ -1,7 +1,5 @@
-# Entorno virtual
-venv/
-env/
-ENV/
+# Directorio de backups
+backups/
 
 # Archivos de Python
 __pycache__/
@@ -9,48 +7,25 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Archivos de IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Entornos virtuales
+venv/
+env/
+ENV/
+
+# Base de datos (opcional - descomentar si no quieres subir la BD)
+# database/*.db
 
 # Archivos del sistema
 .DS_Store
 Thumbs.db
 
-# Archivos de log
-*.log
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Archivos temporales
-*.tmp
-*.temp
+# Recibos generados (opcional)
+# recibos/*.pdf
 
-# Archivos de respaldo
-*.bak
-*.backup
-
-# Archivos de configuración local
-.env
-config.local.py
-
-# Archivos de recibos generados (opcional - puedes comentar esta línea si quieres incluir los recibos)
-recibos/
-*.pdf

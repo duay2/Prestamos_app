@@ -9,11 +9,25 @@ from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple
 from dateutil.relativedelta import relativedelta
 import math
+import os
+import subprocess
+import platform
+from src.tarifas import obtener_cuota_quincenal, calcular_total_pagar
+
+def get_db_path():
+    """Obtener la ruta absoluta de la base de datos"""
+    # Obtener el directorio base del proyecto (un nivel arriba de src)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_dir = os.path.join(base_dir, 'database')
+    db_path = os.path.join(db_dir, 'prestamos.db')
+    return db_path
 
 class PagoManager:
     """Modelo para la gestión de datos de pagos"""
     
-    def __init__(self, db_path: str = '../database/prestamos.db'):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = get_db_path()
         self.db_path = db_path
     
     def get_connection(self) -> sqlite3.Connection:
@@ -34,32 +48,60 @@ class PagoManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                query = '''
-                    SELECT 
-                        p.id as prestamo_id,
-                        c.id as cliente_id,
-                        c.nombre as nombre_cliente,
-                        '' as apellido_cliente,
-                        p.monto_total,
-                        p.tasa_interes,
-                        p.fecha_inicio,
-                        p.plazo_quincenas,
-                        p.estado,
-                        COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as total_pagado,
-                        p.monto_total - COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as saldo_pendiente
-                    FROM prestamos p
-                    JOIN clientes c ON p.cliente_id = c.id
-                    LEFT JOIN pagos pag ON p.id = pag.prestamo_id
-                    WHERE p.estado = 'ACTIVO'
-                '''
+                # Verificar si los campos nuevos existen
+                cursor.execute("PRAGMA table_info(prestamos)")
+                columnas = cursor.fetchall()
+                nombres_columnas = [col[1] for col in columnas]
+                
+                if 'tiene_seguro' in nombres_columnas:
+                    query = '''
+                        SELECT 
+                            p.id as prestamo_id,
+                            c.id as cliente_id,
+                            c.nombre as nombre_cliente,
+                            '' as apellido_cliente,
+                            p.monto_total,
+                            p.tasa_interes,
+                            p.fecha_inicio,
+                            p.plazo_quincenas,
+                            p.estado,
+                            p.tiene_seguro,
+                            COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as total_pagado,
+                            COUNT(pag.id) as pagos_realizados
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                        LEFT JOIN pagos pag ON p.id = pag.prestamo_id
+                        WHERE p.estado = 'ACTIVO'
+                    '''
+                    query_group = " GROUP BY p.id, c.id, c.nombre, p.monto_total, p.tasa_interes, p.fecha_inicio, p.plazo_quincenas, p.estado, p.tiene_seguro"
+                else:
+                    query = '''
+                        SELECT 
+                            p.id as prestamo_id,
+                            c.id as cliente_id,
+                            c.nombre as nombre_cliente,
+                            '' as apellido_cliente,
+                            p.monto_total,
+                            p.tasa_interes,
+                            p.fecha_inicio,
+                            p.plazo_quincenas,
+                            p.estado,
+                            0 as tiene_seguro,
+                            COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as total_pagado,
+                            COUNT(pag.id) as pagos_realizados
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                        LEFT JOIN pagos pag ON p.id = pag.prestamo_id
+                        WHERE p.estado = 'ACTIVO'
+                    '''
+                    query_group = " GROUP BY p.id, c.id, c.nombre, p.monto_total, p.tasa_interes, p.fecha_inicio, p.plazo_quincenas, p.estado"
                 
                 params = []
                 if cliente_id:
                     query += " AND c.id = ?"
                     params.append(cliente_id)
                 
-                query += " GROUP BY p.id, c.id, c.nombre, p.monto_total, p.tasa_interes, p.fecha_inicio, p.plazo_quincenas, p.estado"
-                query += " HAVING saldo_pendiente > 0"
+                query += query_group
                 query += " ORDER BY c.nombre, p.fecha_inicio"
                 
                 cursor.execute(query, params)
@@ -67,35 +109,67 @@ class PagoManager:
                 
                 pagos_pendientes = []
                 for row in rows:
-                    pagos_pendientes.append({
-                        'prestamo_id': row[0],
-                        'cliente_id': row[1],
-                        'nombre_cliente': row[2],
-                        'apellido_cliente': row[3],
-                        'monto_total': row[4],
-                        'tasa_interes': row[5],
-                        'fecha_inicio': row[6],
-                        'plazo_quincenas': row[7],
-                        'estado': row[8],
-                        'total_pagado': row[9],
-                        'saldo_pendiente': row[10]
-                    })
+                    prestamo_id = row[0]
+                    cliente_id = row[1]
+                    nombre_cliente = row[2]
+                    apellido_cliente = row[3]
+                    monto_prestamo = row[4]  # Monto original del préstamo
+                    tasa_interes = row[5]
+                    fecha_inicio = row[6]
+                    plazo_quincenas = row[7]
+                    estado = row[8]
+                    tiene_seguro = bool(row[9]) if len(row) > 9 else False
+                    total_pagado = row[10]
+                    pagos_realizados = row[11]  # Número de pagos realizados
+                    
+                    # Calcular cuota quincenal y total a pagar usando la matriz de tarifas
+                    cuota_base = obtener_cuota_quincenal(monto_prestamo, plazo_quincenas)
+                    cuota_quincenal = cuota_base + (15.0 if tiene_seguro else 0.0)
+                    total_base = calcular_total_pagar(monto_prestamo, plazo_quincenas)
+                    total_a_pagar = total_base + (15.0 * plazo_quincenas if tiene_seguro else 0.0)
+                    
+                    # Calcular saldo pendiente: total a pagar - total pagado
+                    saldo_pendiente = total_a_pagar - total_pagado
+                    
+                    # Calcular progreso (ej: 1/8, 2/8, etc.)
+                    # El siguiente pago será pagos_realizados + 1
+                    siguiente_pago = pagos_realizados + 1
+                    progreso = f"{siguiente_pago}/{plazo_quincenas}"
+                    
+                    # Solo incluir si hay saldo pendiente
+                    if saldo_pendiente > 0:
+                        pagos_pendientes.append({
+                            'prestamo_id': prestamo_id,
+                            'cliente_id': cliente_id,
+                            'nombre_cliente': nombre_cliente,
+                            'apellido_cliente': apellido_cliente,
+                            'monto_prestamo': monto_prestamo,  # Monto original
+                            'monto_total': monto_prestamo,  # Mantener para compatibilidad
+                            'tasa_interes': tasa_interes,
+                            'fecha_inicio': fecha_inicio,
+                            'plazo_quincenas': plazo_quincenas,
+                            'estado': estado,
+                            'total_pagado': total_pagado,
+                            'saldo_pendiente': max(0, saldo_pendiente),  # Asegurar que no sea negativo
+                            'cuota_quincenal': cuota_quincenal,
+                            'total_a_pagar': total_a_pagar,
+                            'progreso': progreso,
+                            'pagos_realizados': pagos_realizados
+                        })
                 
                 return pagos_pendientes
         except sqlite3.Error as e:
             raise Exception(f"Error al obtener pagos pendientes: {e}")
     
-    def registrar_pago(self, prestamo_id: int, fecha_pago: str, monto_capital: float, 
-                      monto_interes: float, monto_seguro: float = 0, recibido_por: str = None) -> int:
+    def registrar_pago(self, prestamo_id: int, fecha_pago: str, monto_pago: float, 
+                      recibido_por: str = None) -> int:
         """
-        Registrar un nuevo pago
+        Registrar un nuevo pago de quincena
         
         Args:
             prestamo_id: ID del préstamo
             fecha_pago: Fecha del pago (YYYY-MM-DD)
-            monto_capital: Monto de capital
-            monto_interes: Monto de interés
-            monto_seguro: Monto de seguro (opcional)
+            monto_pago: Monto del pago (debe ser igual a la cuota quincenal)
             recibido_por: Nombre de quien recibió el pago
         
         Returns:
@@ -105,51 +179,80 @@ class PagoManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Obtener información del préstamo
-                cursor.execute('''
-                    SELECT p.monto_total, p.plazo_quincenas, p.fecha_inicio,
-                           COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as total_pagado
-                    FROM prestamos p
-                    LEFT JOIN pagos pag ON p.id = pag.prestamo_id
-                    WHERE p.id = ?
-                    GROUP BY p.monto_total, p.plazo_quincenas, p.fecha_inicio
-                ''', (prestamo_id,))
+                # Verificar si los campos nuevos existen
+                cursor.execute("PRAGMA table_info(prestamos)")
+                columnas = cursor.fetchall()
+                nombres_columnas = [col[1] for col in columnas]
                 
+                if 'tiene_seguro' in nombres_columnas:
+                    query_prestamo = '''
+                        SELECT p.monto_total, p.plazo_quincenas, p.fecha_inicio, p.tiene_seguro,
+                               COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as total_pagado
+                        FROM prestamos p
+                        LEFT JOIN pagos pag ON p.id = pag.prestamo_id
+                        WHERE p.id = ?
+                        GROUP BY p.monto_total, p.plazo_quincenas, p.fecha_inicio, p.tiene_seguro
+                    '''
+                else:
+                    query_prestamo = '''
+                        SELECT p.monto_total, p.plazo_quincenas, p.fecha_inicio, 0,
+                               COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as total_pagado
+                        FROM prestamos p
+                        LEFT JOIN pagos pag ON p.id = pag.prestamo_id
+                        WHERE p.id = ?
+                        GROUP BY p.monto_total, p.plazo_quincenas, p.fecha_inicio
+                    '''
+                
+                cursor.execute(query_prestamo, (prestamo_id,))
                 prestamo_info = cursor.fetchone()
                 if not prestamo_info:
                     raise Exception("Préstamo no encontrado")
                 
-                monto_total, plazo_quincenas, fecha_inicio, total_pagado = prestamo_info
+                if len(prestamo_info) >= 5:
+                    monto_prestamo, plazo_quincenas, fecha_inicio, tiene_seguro, total_pagado = prestamo_info[:5]
+                    tiene_seguro = bool(tiene_seguro)
+                else:
+                    monto_prestamo, plazo_quincenas, fecha_inicio, total_pagado = prestamo_info[:4]
+                    tiene_seguro = False
                 
-                # Calcular número de quincena
-                fecha_inicio_obj = datetime.strptime(fecha_inicio, '%Y-%m-%d')
-                fecha_pago_obj = datetime.strptime(fecha_pago, '%Y-%m-%d')
+                # Calcular cuota quincenal y total a pagar usando la matriz de tarifas
+                cuota_base = obtener_cuota_quincenal(monto_prestamo, plazo_quincenas)
+                cuota_quincenal = cuota_base + (15.0 if tiene_seguro else 0.0)
+                total_base = calcular_total_pagar(monto_prestamo, plazo_quincenas)
+                total_a_pagar = total_base + (15.0 * plazo_quincenas if tiene_seguro else 0.0)
                 
-                # Calcular quincena basada en la fecha de inicio
-                meses_transcurridos = (fecha_pago_obj.year - fecha_inicio_obj.year) * 12 + fecha_pago_obj.month - fecha_inicio_obj.month
-                quincena = meses_transcurridos * 2 + 1
-                if fecha_pago_obj.day > 15:
-                    quincena += 1
+                # Validar que el monto del pago sea exactamente la cuota quincenal
+                if abs(monto_pago - cuota_quincenal) > 0.01:  # Permitir pequeña diferencia por redondeo
+                    raise Exception(f"El monto del pago (${monto_pago:,.2f}) debe ser exactamente la cuota quincenal (${cuota_quincenal:,.2f})")
+                
+                # Obtener el número de la próxima quincena
+                numero_quincena = self.obtener_proxima_quincena(prestamo_id)
+                
+                # Verificar que no se exceda el número de quincenas
+                if numero_quincena > plazo_quincenas:
+                    raise Exception(f"Ya se han registrado todos los pagos. El préstamo tiene {plazo_quincenas} quincenas.")
                 
                 # Verificar que no se exceda el saldo pendiente
-                saldo_pendiente = monto_total - total_pagado
-                monto_total_pago = monto_capital + monto_interes + monto_seguro
+                saldo_pendiente = total_a_pagar - total_pagado
+                if monto_pago > saldo_pendiente:
+                    raise Exception(f"El monto del pago (${monto_pago:,.2f}) excede el saldo pendiente (${saldo_pendiente:,.2f})")
                 
-                if monto_total_pago > saldo_pendiente:
-                    raise Exception(f"El monto del pago (${monto_total_pago:,.2f}) excede el saldo pendiente (${saldo_pendiente:,.2f})")
-                
-                # Insertar el pago
+                # El monto del pago se registra como capital (ya incluye intereses en la tarifa)
+                # Para mantener compatibilidad con la estructura de la BD, registramos:
+                # - monto_capital = cuota quincenal (todo el pago)
+                # - monto_interes = 0 (ya está incluido en la tarifa)
+                # - monto_seguro = 0
                 cursor.execute('''
                     INSERT INTO pagos (prestamo_id, numero_quincena, fecha_pago, monto_capital, 
                                      monto_interes, monto_seguro, recibido_por)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (prestamo_id, quincena, fecha_pago, monto_capital, monto_interes, monto_seguro, recibido_por))
+                    VALUES (?, ?, ?, ?, 0, 0, ?)
+                ''', (prestamo_id, numero_quincena, fecha_pago, monto_pago, recibido_por))
                 
                 pago_id = cursor.lastrowid
                 
                 # Verificar si el préstamo está completamente pagado
-                nuevo_total_pagado = total_pagado + monto_total_pago
-                if nuevo_total_pagado >= monto_total:
+                nuevo_total_pagado = total_pagado + monto_pago
+                if nuevo_total_pagado >= total_a_pagar or numero_quincena >= plazo_quincenas:
                     cursor.execute('''
                         UPDATE prestamos SET estado = 'PAGADO' WHERE id = ?
                     ''', (prestamo_id,))
@@ -280,24 +383,26 @@ class PagoManager:
             prestamo_id: ID del préstamo
         
         Returns:
-            float: Saldo pendiente
+            float: Saldo pendiente (total a pagar - total pagado)
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT p.monto_total,
+                    SELECT p.monto_total, p.plazo_quincenas,
                            COALESCE(SUM(pag.monto_capital + pag.monto_interes + pag.monto_seguro), 0) as total_pagado
                     FROM prestamos p
                     LEFT JOIN pagos pag ON p.id = pag.prestamo_id
                     WHERE p.id = ?
-                    GROUP BY p.monto_total
+                    GROUP BY p.monto_total, p.plazo_quincenas
                 ''', (prestamo_id,))
                 
                 row = cursor.fetchone()
                 if row:
-                    monto_total, total_pagado = row
-                    return max(0, monto_total - total_pagado)
+                    monto_prestamo, plazo_quincenas, total_pagado = row
+                    # Calcular total a pagar usando la matriz de tarifas
+                    total_a_pagar = calcular_total_pagar(monto_prestamo, plazo_quincenas)
+                    return max(0, total_a_pagar - total_pagado)
                 return 0
         except sqlite3.Error as e:
             raise Exception(f"Error al calcular saldo pendiente: {e}")
@@ -321,7 +426,7 @@ class PagoManager:
                            (p.monto_capital + p.monto_interes + p.monto_seguro) as monto_total
                     FROM pagos p
                     WHERE p.prestamo_id = ?
-                    ORDER BY p.fecha_pago
+                    ORDER BY p.numero_quincena
                 ''', (prestamo_id,))
                 
                 rows = cursor.fetchall()
@@ -343,6 +448,30 @@ class PagoManager:
         except sqlite3.Error as e:
             raise Exception(f"Error al obtener historial de pagos: {e}")
     
+    def obtener_proxima_quincena(self, prestamo_id: int) -> int:
+        """
+        Obtener el número de la próxima quincena a pagar
+        
+        Args:
+            prestamo_id: ID del préstamo
+        
+        Returns:
+            int: Número de la próxima quincena (1, 2, 3, etc.)
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COALESCE(MAX(numero_quincena), 0) + 1
+                    FROM pagos
+                    WHERE prestamo_id = ?
+                ''', (prestamo_id,))
+                
+                row = cursor.fetchone()
+                return row[0] if row else 1
+        except sqlite3.Error as e:
+            raise Exception(f"Error al obtener próxima quincena: {e}")
+    
     def verificar_pago_completo(self, prestamo_id: int) -> bool:
         """
         Verificar si un préstamo está completamente pagado
@@ -360,11 +489,11 @@ class PagoManager:
             raise Exception(f"Error al verificar pago completo: {e}")
 
 # Funciones de conveniencia
-def registrar_pago(prestamo_id: int, fecha_pago: str, monto_capital: float, 
-                  monto_interes: float, monto_seguro: float = 0, recibido_por: str = None) -> int:
+def registrar_pago(prestamo_id: int, fecha_pago: str, monto_pago: float, 
+                  recibido_por: str = None) -> int:
     """Función de conveniencia para registrar un pago"""
     manager = PagoManager()
-    return manager.registrar_pago(prestamo_id, fecha_pago, monto_capital, monto_interes, monto_seguro, recibido_por)
+    return manager.registrar_pago(prestamo_id, fecha_pago, monto_pago, recibido_por)
 
 def obtener_pagos_pendientes(cliente_id: int = None) -> List[Dict]:
     """Función de conveniencia para obtener pagos pendientes"""
@@ -388,10 +517,14 @@ import math
 class PagoDialog:
     """Diálogo para registrar pagos"""
     
-    def __init__(self, parent, prestamo_data: Dict):
+    def __init__(self, parent, prestamo_data: Dict, pago_manager: PagoManager):
         self.parent = parent
         self.prestamo_data = prestamo_data
+        self.pago_manager = pago_manager
         self.result = None
+        
+        # Obtener próxima quincena
+        self.proxima_quincena = self.pago_manager.obtener_proxima_quincena(prestamo_data['prestamo_id'])
         
         # Crear ventana de diálogo
         self.dialog = tk.Toplevel(parent)
@@ -433,91 +566,105 @@ class PagoDialog:
         self.fecha_entry = ttk.Entry(form_frame, textvariable=self.fecha_var, width=30)
         self.fecha_entry.grid(row=0, column=1, sticky='ew', padx=(10, 0), pady=5)
         
-        # Monto capital
-        ttk.Label(form_frame, text="Monto Capital *:").grid(row=1, column=0, sticky='w', pady=5)
-        self.capital_var = tk.StringVar()
-        self.capital_entry = ttk.Entry(form_frame, textvariable=self.capital_var, width=30)
-        self.capital_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0), pady=5)
-        
-        # Monto interés
-        ttk.Label(form_frame, text="Monto Interés:").grid(row=2, column=0, sticky='w', pady=5)
-        self.interes_var = tk.StringVar(value="0")
-        self.interes_entry = ttk.Entry(form_frame, textvariable=self.interes_var, width=30)
-        self.interes_entry.grid(row=2, column=1, sticky='ew', padx=(10, 0), pady=5)
-        
-        # Monto seguro
-        ttk.Label(form_frame, text="Monto Seguro:").grid(row=3, column=0, sticky='w', pady=5)
-        self.seguro_var = tk.StringVar(value="0")
-        self.seguro_entry = ttk.Entry(form_frame, textvariable=self.seguro_var, width=30)
-        self.seguro_entry.grid(row=3, column=1, sticky='ew', padx=(10, 0), pady=5)
+        # Monto del pago (cuota quincenal)
+        ttk.Label(form_frame, text="Monto a Pagar *:").grid(row=1, column=0, sticky='w', pady=5)
+        self.monto_var = tk.StringVar()
+        self.monto_entry = ttk.Entry(form_frame, textvariable=self.monto_var, width=30)
+        self.monto_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0), pady=5)
         
         # Recibido por
-        ttk.Label(form_frame, text="Recibido por:").grid(row=4, column=0, sticky='w', pady=5)
+        ttk.Label(form_frame, text="Recibido por:").grid(row=2, column=0, sticky='w', pady=5)
         self.recibido_var = tk.StringVar()
         self.recibido_entry = ttk.Entry(form_frame, textvariable=self.recibido_var, width=30)
-        self.recibido_entry.grid(row=4, column=1, sticky='ew', padx=(10, 0), pady=5)
+        self.recibido_entry.grid(row=2, column=1, sticky='ew', padx=(10, 0), pady=5)
         
         # Configurar expansión de columnas
         form_frame.columnconfigure(1, weight=1)
         
         # Frame para resumen
         resumen_frame = ttk.LabelFrame(main_frame, text="Resumen del Pago", padding="10")
-        resumen_frame.pack(fill='x', pady=10)
+        resumen_frame.pack(fill='both', expand=True, pady=10)
         
-        self.resumen_label = ttk.Label(resumen_frame, text="", font=('Arial', 10))
-        self.resumen_label.pack()
+        # Usar Text widget para mejor visualización del resumen
+        bg_color = self.dialog.cget('bg')
+        self.resumen_text = tk.Text(resumen_frame, height=6, font=('Arial', 10), 
+                                    bg=bg_color, fg='black', wrap='word',
+                                    relief='flat', borderwidth=0, padx=5, pady=5)
+        self.resumen_text.pack(fill='both', expand=True)
+        # Insertar texto inicial
+        self.resumen_text.insert('1.0', 'Ingresa el monto para ver el resumen...')
+        self.resumen_text.config(state='disabled')  # Solo lectura
         
         # Frame para botones
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill='x', pady=(20, 0))
         
-        # Botones
-        ttk.Button(button_frame, text="Calcular", command=self.calcular_resumen).pack(side='left', padx=(0, 5))
-        ttk.Button(button_frame, text="Guardar", command=self.guardar).pack(side='right', padx=(5, 0))
+        # Botones - hacer el botón de confirmar más visible
+        ttk.Button(button_frame, text="Confirmar Pago", command=self.guardar).pack(side='right', padx=(5, 0))
         ttk.Button(button_frame, text="Cancelar", command=self.cancelar).pack(side='right')
         
-        # Enfocar en el primer campo
-        self.fecha_entry.focus()
+        # Enfocar en el campo de monto
+        self.monto_entry.focus()
         
         # Bind eventos
-        self.capital_var.trace('w', lambda *args: self.calcular_resumen())
-        self.interes_var.trace('w', lambda *args: self.calcular_resumen())
-        self.seguro_var.trace('w', lambda *args: self.calcular_resumen())
+        self.monto_var.trace('w', lambda *args: self.calcular_resumen())
         self.dialog.bind('<Return>', lambda e: self.guardar())
         self.dialog.bind('<Escape>', lambda e: self.cancelar())
     
     def cargar_datos_prestamo(self):
         """Cargar información del préstamo"""
         prestamo = self.prestamo_data
+        cuota_quincenal = prestamo.get('cuota_quincenal', 0)
+        plazo_quincenas = prestamo.get('plazo_quincenas', 0)
+        
+        # Mostrar progreso (ej: 1/8, 2/8)
+        progreso = f"{self.proxima_quincena}/{plazo_quincenas}"
+        
         info_text = f"""Cliente: {prestamo['nombre_cliente']}
-Monto Total: ${prestamo['monto_total']:,.2f}
+Monto del Préstamo: ${prestamo['monto_prestamo']:,.2f}
+Cuota Quincenal: ${cuota_quincenal:,.2f}
+Progreso: {progreso}
 Saldo Pendiente: ${prestamo['saldo_pendiente']:,.2f}
-Tasa de Interés: {prestamo['tasa_interes']}%
 Fecha de Inicio: {prestamo['fecha_inicio']}"""
         
         self.info_label.config(text=info_text)
+        
+        # Prellenar el monto con la cuota quincenal
+        self.monto_var.set(f"{cuota_quincenal:.2f}")
         self.calcular_resumen()
     
     def calcular_resumen(self):
         """Calcular resumen del pago"""
         try:
-            capital = float(self.capital_var.get() or 0)
-            interes = float(self.interes_var.get() or 0)
-            seguro = float(self.seguro_var.get() or 0)
-            total = capital + interes + seguro
-            
+            monto = float(self.monto_var.get() or 0)
+            cuota_quincenal = self.prestamo_data.get('cuota_quincenal', 0)
             saldo_pendiente = self.prestamo_data['saldo_pendiente']
+            plazo_quincenas = self.prestamo_data.get('plazo_quincenas', 0)
             
-            resumen_text = f"""Monto Capital: ${capital:,.2f}
-Monto Interés: ${interes:,.2f}
-Monto Seguro: ${seguro:,.2f}
-Total a Pagar: ${total:,.2f}
-Saldo Restante: ${max(0, saldo_pendiente - total):,.2f}"""
+            # Calcular nuevo progreso después del pago
+            nuevo_progreso = f"{self.proxima_quincena + 1}/{plazo_quincenas}" if abs(monto - cuota_quincenal) <= 0.01 else f"{self.proxima_quincena}/{plazo_quincenas}"
             
-            self.resumen_label.config(text=resumen_text)
+            # Formatear resumen con saltos de línea explícitos
+            resumen_text = f"Monto a Pagar: ${monto:,.2f}\n" \
+                          f"Cuota Quincenal Esperada: ${cuota_quincenal:,.2f}\n" \
+                          f"Progreso después del pago: {nuevo_progreso}\n" \
+                          f"Saldo Restante: ${max(0, saldo_pendiente - monto):,.2f}"
+            
+            # Mostrar advertencia si el monto no coincide
+            if monto > 0 and abs(monto - cuota_quincenal) > 0.01:
+                resumen_text += f"\n\n⚠ Advertencia: El monto debe ser ${cuota_quincenal:,.2f}"
+            
+            # Actualizar el widget Text
+            self.resumen_text.config(state='normal')
+            self.resumen_text.delete('1.0', tk.END)
+            self.resumen_text.insert('1.0', resumen_text)
+            self.resumen_text.config(state='disabled')
             
         except ValueError:
-            self.resumen_label.config(text="Ingresa montos válidos")
+            self.resumen_text.config(state='normal')
+            self.resumen_text.delete('1.0', tk.END)
+            self.resumen_text.insert('1.0', "Ingresa un monto válido")
+            self.resumen_text.config(state='disabled')
     
     def guardar(self):
         """Guardar datos del pago"""
@@ -526,17 +673,24 @@ Saldo Restante: ${max(0, saldo_pendiente - total):,.2f}"""
         
         try:
             fecha = self.fecha_var.get()
-            capital = float(self.capital_var.get())
-            interes = float(self.interes_var.get() or 0)
-            seguro = float(self.seguro_var.get() or 0)
+            monto = float(self.monto_var.get())
             recibido = self.recibido_var.get()
+            
+            # Mostrar diálogo de confirmación
+            cliente = self.prestamo_data['nombre_cliente']
+            confirmacion = f"¿Confirmar el registro del pago?\n\n" \
+                          f"Cliente: {cliente}\n" \
+                          f"Fecha: {fecha}\n" \
+                          f"Monto: ${monto:,.2f}\n" \
+                          f"Recibido por: {recibido or 'No especificado'}"
+            
+            if not messagebox.askyesno("Confirmar Pago", confirmacion, parent=self.dialog):
+                return
             
             self.result = {
                 'prestamo_id': self.prestamo_data['prestamo_id'],
                 'fecha_pago': fecha,
-                'monto_capital': capital,
-                'monto_interes': interes,
-                'monto_seguro': seguro,
+                'monto_pago': monto,
                 'recibido_por': recibido
             }
             
@@ -561,35 +715,28 @@ Saldo Restante: ${max(0, saldo_pendiente - total):,.2f}"""
             self.fecha_entry.focus()
             return False
         
-        # Validar monto capital
+        # Validar monto
         try:
-            capital = float(self.capital_var.get())
-            if capital <= 0:
-                messagebox.showerror("Error", "El monto de capital debe ser mayor a 0", parent=self.dialog)
-                self.capital_entry.focus()
+            monto = float(self.monto_var.get())
+            if monto <= 0:
+                messagebox.showerror("Error", "El monto debe ser mayor a 0", parent=self.dialog)
+                self.monto_entry.focus()
+                return False
+            
+            cuota_quincenal = self.prestamo_data.get('cuota_quincenal', 0)
+            if abs(monto - cuota_quincenal) > 0.01:
+                messagebox.showerror("Error", f"El monto debe ser exactamente la cuota quincenal: ${cuota_quincenal:,.2f}", parent=self.dialog)
+                self.monto_entry.focus()
                 return False
         except ValueError:
-            messagebox.showerror("Error", "El monto de capital debe ser un número válido", parent=self.dialog)
-            self.capital_entry.focus()
-            return False
-        
-        # Validar montos adicionales
-        try:
-            interes = float(self.interes_var.get() or 0)
-            seguro = float(self.seguro_var.get() or 0)
-            if interes < 0 or seguro < 0:
-                messagebox.showerror("Error", "Los montos de interés y seguro no pueden ser negativos", parent=self.dialog)
-                return False
-        except ValueError:
-            messagebox.showerror("Error", "Los montos deben ser números válidos", parent=self.dialog)
+            messagebox.showerror("Error", "El monto debe ser un número válido", parent=self.dialog)
+            self.monto_entry.focus()
             return False
         
         # Validar que no exceda el saldo pendiente
-        total_pago = capital + interes + seguro
         saldo_pendiente = self.prestamo_data['saldo_pendiente']
-        
-        if total_pago > saldo_pendiente:
-            messagebox.showerror("Error", f"El total del pago (${total_pago:,.2f}) excede el saldo pendiente (${saldo_pendiente:,.2f})", parent=self.dialog)
+        if monto > saldo_pendiente:
+            messagebox.showerror("Error", f"El monto del pago (${monto:,.2f}) excede el saldo pendiente (${saldo_pendiente:,.2f})", parent=self.dialog)
             return False
         
         return True
@@ -682,29 +829,30 @@ class PagosWindow(ttk.Frame):
         ttk.Button(button_frame, text="Registrar Pago", command=self.registrar_pago).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Ver Historial", command=self.ver_historial).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Generar Recibo", command=self.generar_recibo).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="📄 Hoja de Recibos", command=self.generar_hoja_recibos).pack(side='left', padx=5)
         
         # Frame para la tabla
         table_frame = ttk.Frame(main_frame)
         table_frame.pack(fill='both', expand=True)
         
         # Crear Treeview
-        columns = ('Préstamo ID', 'Cliente', 'Monto Total', 'Pagado', 'Saldo', 'Estado')
+        columns = ('ID', 'Cliente', 'Monto Préstamo', 'Cuota Quincenal', 'Progreso', 'Saldo Pendiente')
         self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=15)
         
         # Configurar columnas
-        self.tree.heading('Préstamo ID', text='Préstamo ID')
+        self.tree.heading('ID', text='ID')
         self.tree.heading('Cliente', text='Cliente')
-        self.tree.heading('Monto Total', text='Monto Total')
-        self.tree.heading('Pagado', text='Pagado')
-        self.tree.heading('Saldo', text='Saldo Pendiente')
-        self.tree.heading('Estado', text='Estado')
+        self.tree.heading('Monto Préstamo', text='Monto del Préstamo')
+        self.tree.heading('Cuota Quincenal', text='Cuota Quincenal')
+        self.tree.heading('Progreso', text='Progreso')
+        self.tree.heading('Saldo Pendiente', text='Saldo Pendiente')
         
-        self.tree.column('Préstamo ID', width=100, anchor='center')
+        self.tree.column('ID', width=80, anchor='center')
         self.tree.column('Cliente', width=200)
-        self.tree.column('Monto Total', width=120, anchor='e')
-        self.tree.column('Pagado', width=120, anchor='e')
-        self.tree.column('Saldo', width=120, anchor='e')
-        self.tree.column('Estado', width=100, anchor='center')
+        self.tree.column('Monto Préstamo', width=150, anchor='e')
+        self.tree.column('Cuota Quincenal', width=150, anchor='e')
+        self.tree.column('Progreso', width=100, anchor='center')
+        self.tree.column('Saldo Pendiente', width=150, anchor='e')
         
         # Scrollbar
         scrollbar = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview)
@@ -730,13 +878,14 @@ class PagosWindow(ttk.Frame):
             
             # Insertar en tabla
             for pago in pagos_pendientes:
+                progreso = pago.get('progreso', '0/0')
                 self.tree.insert('', 'end', values=(
                     pago['prestamo_id'],
                     pago['nombre_cliente'],
-                    f"${pago['monto_total']:,.2f}",
-                    f"${pago['total_pagado']:,.2f}",
-                    f"${pago['saldo_pendiente']:,.2f}",
-                    pago['estado']
+                    f"${pago['monto_prestamo']:,.2f}",
+                    f"${pago['cuota_quincenal']:,.2f}",
+                    progreso,
+                    f"${pago['saldo_pendiente']:,.2f}"
                 ))
             
             # Actualizar estado
@@ -765,13 +914,19 @@ class PagosWindow(ttk.Frame):
             
             # Insertar en tabla
             for pago in pagos:
+                # Asegurar que tenga los campos necesarios
+                monto_prestamo = pago.get('monto_prestamo', pago.get('monto_total', 0))
+                cuota_quincenal = pago.get('cuota_quincenal', 0)
+                saldo_pendiente = pago.get('saldo_pendiente', 0)
+                progreso = pago.get('progreso', '0/0')
+                
                 self.tree.insert('', 'end', values=(
                     pago['prestamo_id'],
                     pago['nombre_cliente'],
-                    f"${pago['monto_total']:,.2f}",
-                    f"${pago['total_pagado']:,.2f}",
-                    f"${pago['saldo_pendiente']:,.2f}",
-                    pago['estado']
+                    f"${monto_prestamo:,.2f}",
+                    f"${cuota_quincenal:,.2f}",
+                    progreso,
+                    f"${saldo_pendiente:,.2f}"
                 ))
             
             # Mostrar resultado de búsqueda
@@ -801,20 +956,46 @@ class PagosWindow(ttk.Frame):
             prestamo_data = self.controller.obtener_prestamo_para_pago(prestamo_id)
             
             if prestamo_data:
-                dialog = PagoDialog(self, prestamo_data)
+                dialog = PagoDialog(self, prestamo_data, self.model)
                 self.wait_window(dialog.dialog)
                 
                 if dialog.result:
                     datos = dialog.result
-                    self.controller.registrar_pago(
+                    pago_id = self.controller.registrar_pago(
                         datos['prestamo_id'],
                         datos['fecha_pago'],
-                        datos['monto_capital'],
-                        datos['monto_interes'],
-                        datos['monto_seguro'],
+                        datos['monto_pago'],
                         datos['recibido_por']
                     )
                     messagebox.showinfo("Éxito", "Pago registrado correctamente")
+                    
+                    # Generar recibo automáticamente
+                    try:
+                        from src.recibos import ReciboManager
+                        recibo_manager = ReciboManager()
+                        ruta_recibo = recibo_manager.generar_recibo_pago_individual(pago_id)
+                        
+                        # Preguntar si desea abrir el recibo
+                        if messagebox.askyesno("Recibo Generado", 
+                                             f"Recibo generado exitosamente.\n\n"
+                                             f"Ubicación: {ruta_recibo}\n\n"
+                                             f"¿Desea abrir el recibo ahora?",
+                                             parent=self):
+                            try:
+                                if platform.system() == 'Windows':
+                                    os.startfile(ruta_recibo)
+                                elif platform.system() == 'Darwin':  # macOS
+                                    subprocess.call(['open', ruta_recibo])
+                                else:  # Linux
+                                    subprocess.call(['xdg-open', ruta_recibo])
+                            except Exception as e:
+                                messagebox.showinfo("Información", 
+                                                   f"No se pudo abrir el archivo automáticamente.\n"
+                                                   f"Puede abrirlo manualmente desde:\n{ruta_recibo}")
+                    except Exception as e:
+                        messagebox.showwarning("Advertencia", 
+                                             f"El pago se registró correctamente, pero hubo un error al generar el recibo:\n{e}")
+                    
                     self.listar_pagos_pendientes()
             
         except Exception as e:
@@ -905,11 +1086,124 @@ class PagosWindow(ttk.Frame):
         
         try:
             prestamo_id = self.pago_seleccionado[0]
-            # TODO: Implementar generación de recibo
-            messagebox.showinfo("Información", "Generación de recibos en desarrollo")
+            # Obtener el último pago del préstamo
+            historial = self.controller.obtener_historial_pagos(prestamo_id)
+            if not historial:
+                messagebox.showwarning("Advertencia", "Este préstamo no tiene pagos registrados")
+                return
+            
+            # Obtener el último pago
+            ultimo_pago = historial[-1]
+            pago_id = ultimo_pago['id']
+            
+            # Generar recibo
+            from src.recibos import ReciboManager
+            recibo_manager = ReciboManager()
+            ruta_recibo = recibo_manager.generar_recibo_pago_individual(pago_id)
+            
+            # Preguntar si desea abrir el recibo
+            if messagebox.askyesno("Recibo Generado", 
+                                 f"Recibo generado exitosamente.\n\n"
+                                 f"Ubicación: {ruta_recibo}\n\n"
+                                 f"¿Desea abrir el recibo ahora?",
+                                 parent=self):
+                try:
+                    if platform.system() == 'Windows':
+                        os.startfile(ruta_recibo)
+                    elif platform.system() == 'Darwin':  # macOS
+                        subprocess.call(['open', ruta_recibo])
+                    else:  # Linux
+                        subprocess.call(['xdg-open', ruta_recibo])
+                except Exception as e:
+                    messagebox.showinfo("Información", 
+                                       f"No se pudo abrir el archivo automáticamente.\n"
+                                       f"Puede abrirlo manualmente desde:\n{ruta_recibo}")
         
         except Exception as e:
             messagebox.showerror("Error", f"Error al generar recibo: {e}")
+    
+    def generar_hoja_recibos(self):
+        """Generar hoja con recibos de todos los préstamos activos"""
+        try:
+            from src.recibos import ReciboManager
+            recibo_manager = ReciboManager()
+            
+            # Mostrar mensaje de confirmación
+            respuesta = messagebox.askyesno("Generar Hoja de Recibos", 
+                                           "Se generará una hoja PDF con todos los préstamos activos.\n\n"
+                                           "Cada recibo tendrá un borde para facilitar el recorte.\n\n"
+                                           "¿Desea continuar?",
+                                           parent=self)
+            if not respuesta:
+                return
+            
+            # Generar la hoja
+            ruta_hoja = recibo_manager.generar_hoja_recibos_activos()
+            
+            # Preguntar si desea abrir el PDF
+            if messagebox.askyesno("Hoja Generada", 
+                                  f"Hoja de recibos generada exitosamente.\n\n"
+                                  f"Ubicación: {ruta_hoja}\n\n"
+                                  f"¿Desea abrir el archivo ahora?",
+                                  parent=self):
+                try:
+                    if platform.system() == 'Windows':
+                        os.startfile(ruta_hoja)
+                    elif platform.system() == 'Darwin':  # macOS
+                        subprocess.call(['open', ruta_hoja])
+                    else:  # Linux
+                        subprocess.call(['xdg-open', ruta_hoja])
+                except Exception as e:
+                    messagebox.showinfo("Información", 
+                                       f"No se pudo abrir el archivo automáticamente.\n"
+                                       f"Puede abrirlo manualmente desde:\n{ruta_hoja}")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al generar hoja de recibos: {e}")
+    
+    def generar_recibo_cliente(self):
+        """Generar recibo en formato CAPTA VALE para el cliente seleccionado"""
+        if not self.pago_seleccionado:
+            messagebox.showwarning("Advertencia", "Selecciona un préstamo para generar el recibo del cliente", parent=self)
+            return
+        
+        try:
+            from src.recibos import ReciboManager
+            recibo_manager = ReciboManager()
+            
+            # Obtener ID del cliente del préstamo seleccionado
+            prestamo_id = self.pago_seleccionado[0]
+            prestamo_data = self.controller.obtener_prestamo_para_pago(prestamo_id)
+            
+            if not prestamo_data:
+                messagebox.showerror("Error", "No se pudo obtener información del préstamo", parent=self)
+                return
+            
+            cliente_id = prestamo_data['cliente_id']
+            
+            # Generar recibo
+            ruta_recibo = recibo_manager.generar_recibo_cliente_formato_capta(cliente_id)
+            
+            # Preguntar si desea abrir el PDF
+            if messagebox.askyesno("Recibo Generado", 
+                                  f"Recibo generado exitosamente.\n\n"
+                                  f"Ubicación: {ruta_recibo}\n\n"
+                                  f"¿Desea abrir el archivo ahora?",
+                                  parent=self):
+                try:
+                    if platform.system() == 'Windows':
+                        os.startfile(ruta_recibo)
+                    elif platform.system() == 'Darwin':  # macOS
+                        subprocess.call(['open', ruta_recibo])
+                    else:  # Linux
+                        subprocess.call(['xdg-open', ruta_recibo])
+                except Exception as e:
+                    messagebox.showinfo("Información", 
+                                       f"No se pudo abrir el archivo automáticamente.\n"
+                                       f"Puede abrirlo manualmente desde:\n{ruta_recibo}")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al generar recibo: {e}", parent=self)
     
     def on_select(self, event):
         """Manejar selección de pago"""
@@ -962,16 +1256,13 @@ class PagoController:
         except Exception as e:
             raise Exception(f"Error al obtener préstamo: {e}")
     
-    def registrar_pago(self, prestamo_id: int, fecha_pago: str, monto_capital: float, 
-                      monto_interes: float, monto_seguro: float, recibido_por: str) -> int:
+    def registrar_pago(self, prestamo_id: int, fecha_pago: str, monto_pago: float, 
+                      recibido_por: str = None) -> int:
         """Registrar nuevo pago con validaciones"""
-        if monto_capital <= 0:
-            raise ValueError("El monto de capital debe ser mayor a 0")
+        if monto_pago <= 0:
+            raise ValueError("El monto del pago debe ser mayor a 0")
         
-        if monto_interes < 0 or monto_seguro < 0:
-            raise ValueError("Los montos de interés y seguro no pueden ser negativos")
-        
-        return self.model.registrar_pago(prestamo_id, fecha_pago, monto_capital, monto_interes, monto_seguro, recibido_por)
+        return self.model.registrar_pago(prestamo_id, fecha_pago, monto_pago, recibido_por)
     
     def obtener_historial_pagos(self, prestamo_id: int) -> List[Dict]:
         """Obtener historial de pagos de un préstamo"""

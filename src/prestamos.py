@@ -8,40 +8,109 @@ from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple
 from dateutil.relativedelta import relativedelta
 import math
+import os
+from tarifas import obtener_cuota_quincenal, calcular_total_pagar, calcular_interes_total, validar_monto_y_quincenas, QUINCENAS_DISPONIBLES, calcular_total_pagar as calc_total
+
+def get_db_path():
+    """Obtener la ruta absoluta de la base de datos"""
+    # Obtener el directorio base del proyecto (un nivel arriba de src)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_dir = os.path.join(base_dir, 'database')
+    db_path = os.path.join(db_dir, 'prestamos.db')
+    return db_path
 
 class PrestamoManager:
-    def __init__(self, db_path: str = '../database/prestamos.db'):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = get_db_path()
         self.db_path = db_path
     
     def get_connection(self) -> sqlite3.Connection:
         """Obtener conexión a la base de datos"""
         return sqlite3.connect(self.db_path)
     
-    def crear_prestamo(self, cliente_id: int, monto: float, tasa_interes: float, 
-                      plazo_meses: int, fecha_inicio: str = None) -> int:
+    def crear_prestamo(self, cliente_id: int, monto: float, quincenas: int, 
+                      fecha_inicio: str = None, tasa_interes: float = 0, 
+                      fecha_primer_pago: str = None, detalles: str = None,
+                      tiene_seguro: bool = False, beneficiario: str = None) -> int:
         """
-        Crear un nuevo préstamo
+        Crear un nuevo préstamo basado en la matriz de tarifas
         
         Args:
             cliente_id: ID del cliente
             monto: Monto del préstamo
-            tasa_interes: Tasa de interés anual (porcentaje)
-            plazo_meses: Plazo en meses
+            quincenas: Número de quincenas (6, 8, 10, 12, 14, 16)
             fecha_inicio: Fecha de inicio (formato YYYY-MM-DD, opcional)
+            tasa_interes: Tasa de interés (se mantiene para compatibilidad, pero no se usa en el cálculo)
+            fecha_primer_pago: Fecha del primer pago (formato YYYY-MM-DD, opcional)
+            detalles: Detalles adicionales del préstamo
+            tiene_seguro: Si el préstamo incluye seguro de $15
+            beneficiario: Nombre del beneficiario del seguro
         
         Returns:
             int: ID del préstamo creado
         """
         try:
+            # Validar monto y quincenas
+            es_valido, mensaje = validar_monto_y_quincenas(monto, quincenas)
+            if not es_valido:
+                raise ValueError(mensaje)
+            
             if fecha_inicio is None:
                 fecha_inicio = date.today().isoformat()
             
+            # Si no se proporciona fecha_primer_pago, usar fecha_inicio
+            if fecha_primer_pago is None:
+                fecha_primer_pago = fecha_inicio
+            
+            # Validar que si tiene seguro, debe tener beneficiario
+            if tiene_seguro and not beneficiario:
+                raise ValueError("Si el préstamo incluye seguro, debe especificar un beneficiario")
+            
+            # Calcular el interés total (diferencia entre total a pagar y monto)
+            total_pagar = calcular_total_pagar(monto, quincenas)
+            interes_total = calcular_interes_total(monto, quincenas)
+            
+            # Calcular tasa de interés equivalente (para mostrar en reportes)
+            # Tasa = (interes_total / monto) * (24 / quincenas) * 100 (anualizada)
+            if monto > 0:
+                tasa_equivalente = (interes_total / monto) * (24 / quincenas) * 100
+            else:
+                tasa_equivalente = 0
+            
+            # Almacenar fecha_primer_pago en detalles si no hay detalles
+            # Formato: "FECHA_PRIMER_PAGO:YYYY-MM-DD\n[detalles]"
+            detalles_final = ""
+            if fecha_primer_pago:
+                detalles_final = f"FECHA_PRIMER_PAGO:{fecha_primer_pago}"
+                if detalles:
+                    detalles_final += f"\n{detalles}"
+            elif detalles:
+                detalles_final = detalles
+            
+            # Convertir tiene_seguro a entero (0 o 1)
+            tiene_seguro_int = 1 if tiene_seguro else 0
+            
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO prestamos (cliente_id, monto_total, tasa_interes, plazo_quincenas, fecha_inicio)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (cliente_id, monto, tasa_interes, plazo_meses * 2, fecha_inicio))
+                # Verificar si los campos existen, si no, usar valores por defecto
+                cursor.execute("PRAGMA table_info(prestamos)")
+                columnas = cursor.fetchall()
+                nombres_columnas = [col[1] for col in columnas]
+                
+                if 'tiene_seguro' in nombres_columnas and 'beneficiario' in nombres_columnas:
+                    cursor.execute('''
+                        INSERT INTO prestamos (cliente_id, monto_total, tasa_interes, plazo_quincenas, 
+                                              fecha_inicio, detalles, tiene_seguro, beneficiario)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (cliente_id, monto, round(tasa_equivalente, 2), quincenas, fecha_inicio, 
+                          detalles_final, tiene_seguro_int, beneficiario))
+                else:
+                    # Fallback para bases de datos sin los nuevos campos
+                    cursor.execute('''
+                        INSERT INTO prestamos (cliente_id, monto_total, tasa_interes, plazo_quincenas, fecha_inicio, detalles)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (cliente_id, monto, round(tasa_equivalente, 2), quincenas, fecha_inicio, detalles_final))
                 conn.commit()
                 return cursor.lastrowid
         except sqlite3.Error as e:
@@ -60,16 +129,45 @@ class PrestamoManager:
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
-                           p.tasa_interes, p.plazo_quincenas, p.fecha_inicio, p.estado
-                    FROM prestamos p
-                    JOIN clientes c ON p.cliente_id = c.id
-                    WHERE p.id = ?
-                ''', (prestamo_id,))
+                # Verificar si los campos nuevos existen
+                cursor.execute("PRAGMA table_info(prestamos)")
+                columnas = cursor.fetchall()
+                nombres_columnas = [col[1] for col in columnas]
+                
+                if 'tiene_seguro' in nombres_columnas and 'beneficiario' in nombres_columnas:
+                    cursor.execute('''
+                        SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
+                               p.tasa_interes, p.plazo_quincenas, p.fecha_inicio, p.estado, 
+                               p.detalles, p.tiene_seguro, p.beneficiario
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                        WHERE p.id = ?
+                    ''', (prestamo_id,))
+                else:
+                    cursor.execute('''
+                        SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
+                               p.tasa_interes, p.plazo_quincenas, p.fecha_inicio, p.estado, p.detalles,
+                               0, NULL
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                        WHERE p.id = ?
+                    ''', (prestamo_id,))
+                
                 row = cursor.fetchone()
                 
                 if row:
+                    detalles = row[8] or ''
+                    fecha_primer_pago = None
+                    
+                    # Extraer fecha_primer_pago de detalles si existe
+                    if detalles and detalles.startswith('FECHA_PRIMER_PAGO:'):
+                        lines = detalles.split('\n', 1)
+                        fecha_primer_pago = lines[0].replace('FECHA_PRIMER_PAGO:', '')
+                        detalles = lines[1] if len(lines) > 1 else ''
+                    
+                    tiene_seguro = bool(row[9]) if len(row) > 9 else False
+                    beneficiario = row[10] if len(row) > 10 else None
+                    
                     return {
                         'id': row[0],
                         'cliente_id': row[1],
@@ -80,7 +178,11 @@ class PrestamoManager:
                         'plazo_quincenas': row[5],
                         'plazo_meses': row[5] / 2,  # Convertir quincenas a meses
                         'fecha_inicio': row[6],
-                        'estado': row[7]
+                        'estado': row[7],
+                        'detalles': detalles,
+                        'fecha_primer_pago': fecha_primer_pago,
+                        'tiene_seguro': tiene_seguro,
+                        'beneficiario': beneficiario
                     }
                 return None
         except sqlite3.Error as e:
@@ -101,12 +203,25 @@ class PrestamoManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                query = '''
-                    SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
-                           p.tasa_interes, p.plazo_quincenas, p.fecha_inicio, p.estado
-                    FROM prestamos p
-                    JOIN clientes c ON p.cliente_id = c.id
-                '''
+                # Verificar si los campos nuevos existen
+                cursor.execute("PRAGMA table_info(prestamos)")
+                columnas = cursor.fetchall()
+                nombres_columnas = [col[1] for col in columnas]
+                
+                if 'tiene_seguro' in nombres_columnas:
+                    query = '''
+                        SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
+                               p.tiene_seguro, p.plazo_quincenas, p.fecha_inicio, p.estado
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                    '''
+                else:
+                    query = '''
+                        SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
+                               0, p.plazo_quincenas, p.fecha_inicio, p.estado
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                    '''
                 params = []
                 
                 conditions = []
@@ -127,13 +242,14 @@ class PrestamoManager:
                 prestamos = []
                 
                 for row in rows:
+                    tiene_seguro = bool(row[4]) if len(row) > 4 else False
                     prestamos.append({
                         'id': row[0],
                         'cliente_id': row[1],
                         'nombre_cliente': row[2],
                         'apellido_cliente': '',  # No hay apellido en la BD
                         'monto': row[3],
-                        'tasa_interes': row[4],
+                        'tiene_seguro': tiene_seguro,
                         'plazo_quincenas': row[5],
                         'plazo_meses': row[5] / 2,  # Convertir quincenas a meses
                         'fecha_inicio': row[6],
@@ -160,13 +276,27 @@ class PrestamoManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                query = '''
-                    SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
-                           p.tasa_interes, p.plazo_quincenas, p.fecha_inicio, p.estado
-                    FROM prestamos p
-                    JOIN clientes c ON p.cliente_id = c.id
-                    WHERE 1=1
-                '''
+                # Verificar si los campos nuevos existen
+                cursor.execute("PRAGMA table_info(prestamos)")
+                columnas = cursor.fetchall()
+                nombres_columnas = [col[1] for col in columnas]
+                
+                if 'tiene_seguro' in nombres_columnas:
+                    query = '''
+                        SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
+                               p.tiene_seguro, p.plazo_quincenas, p.fecha_inicio, p.estado
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                        WHERE 1=1
+                    '''
+                else:
+                    query = '''
+                        SELECT p.id, p.cliente_id, c.nombre, p.monto_total, 
+                               0, p.plazo_quincenas, p.fecha_inicio, p.estado
+                        FROM prestamos p
+                        JOIN clientes c ON p.cliente_id = c.id
+                        WHERE 1=1
+                    '''
                 
                 params = []
                 
@@ -206,13 +336,14 @@ class PrestamoManager:
                 
                 prestamos = []
                 for row in rows:
+                    tiene_seguro = bool(row[4]) if len(row) > 4 else False
                     prestamos.append({
                         'id': row[0],
                         'cliente_id': row[1],
                         'nombre_cliente': row[2],
                         'apellido_cliente': '',  # No hay apellido en la BD
                         'monto': row[3],
-                        'tasa_interes': row[4],
+                        'tiene_seguro': tiene_seguro,
                         'plazo_quincenas': row[5],
                         'plazo_meses': row[5] / 2,  # Convertir quincenas a meses
                         'fecha_inicio': row[6],
@@ -224,27 +355,37 @@ class PrestamoManager:
         except sqlite3.Error as e:
             raise Exception(f"Error al buscar préstamos: {e}")
     
-    def calcular_cuota_mensual(self, monto: float, tasa_interes: float, plazo_meses: int) -> float:
+    def calcular_cuota_quincenal(self, monto: float, quincenas: int, tiene_seguro: bool = False) -> float:
         """
-        Calcular la cuota mensual de un préstamo
+        Calcular la cuota quincenal de un préstamo basado en la matriz de tarifas
         
         Args:
             monto: Monto del préstamo
-            tasa_interes: Tasa de interés anual (porcentaje)
-            plazo_meses: Plazo en meses
+            quincenas: Número de quincenas (6, 8, 10, 12, 14, 16)
+            tiene_seguro: Si el préstamo incluye seguro de $15
         
         Returns:
-            float: Cuota mensual
+            float: Cuota quincenal (incluye $15 de seguro si aplica)
         """
-        # Convertir tasa anual a mensual
-        tasa_mensual = tasa_interes / 12 / 100
+        cuota_base = obtener_cuota_quincenal(monto, quincenas)
+        if tiene_seguro:
+            cuota_base += 15.0
+        return round(cuota_base, 2)
+    
+    def calcular_cuota_mensual(self, monto: float, quincenas: int, tiene_seguro: bool = False) -> float:
+        """
+        Calcular la cuota mensual de un préstamo (equivalente a 2 cuotas quincenales)
         
-        if tasa_mensual == 0:
-            return monto / plazo_meses
+        Args:
+            monto: Monto del préstamo
+            quincenas: Número de quincenas
+            tiene_seguro: Si el préstamo incluye seguro de $15
         
-        # Fórmula de cuota fija
-        cuota = monto * (tasa_mensual * (1 + tasa_mensual) ** plazo_meses) / ((1 + tasa_mensual) ** plazo_meses - 1)
-        return round(cuota, 2)
+        Returns:
+            float: Cuota mensual (2 cuotas quincenales)
+        """
+        cuota_quincenal = self.calcular_cuota_quincenal(monto, quincenas, tiene_seguro)
+        return round(cuota_quincenal * 2, 2)
     
     def actualizar_estado_prestamo(self, prestamo_id: int, estado: str) -> bool:
         """
@@ -267,22 +408,56 @@ class PrestamoManager:
                 return cursor.rowcount > 0
         except sqlite3.Error as e:
             raise Exception(f"Error al actualizar estado del préstamo: {e}")
+    
+    def eliminar_prestamo_completo(self, prestamo_id: int) -> bool:
+        """
+        Eliminar completamente un préstamo de la base de datos
+        Esto también eliminará todos los pagos asociados (ON DELETE CASCADE)
+        
+        Args:
+            prestamo_id: ID del préstamo a eliminar
+        
+        Returns:
+            bool: True si se eliminó correctamente
+        
+        Raises:
+            Exception: Si el préstamo tiene pagos registrados y no se puede eliminar
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Verificar si tiene pagos registrados
+                cursor.execute('SELECT COUNT(*) FROM pagos WHERE prestamo_id = ?', (prestamo_id,))
+                tiene_pagos = cursor.fetchone()[0] > 0
+                
+                if tiene_pagos:
+                    # Preguntar confirmación antes de eliminar
+                    # (esto se manejará en la interfaz)
+                    pass
+                
+                # Eliminar el préstamo (los pagos se eliminarán en cascada)
+                cursor.execute('DELETE FROM prestamos WHERE id = ?', (prestamo_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            raise Exception(f"Error al eliminar préstamo: {e}")
 
 # Funciones de conveniencia
-def crear_prestamo(cliente_id: int, monto: float, tasa_interes: float, plazo_meses: int, **kwargs) -> int:
+def crear_prestamo(cliente_id: int, monto: float, quincenas: int, **kwargs) -> int:
     """Función de conveniencia para crear un préstamo"""
     manager = PrestamoManager()
-    return manager.crear_prestamo(cliente_id, monto, tasa_interes, plazo_meses, **kwargs)
+    return manager.crear_prestamo(cliente_id, monto, quincenas, **kwargs)
 
 def obtener_prestamo(prestamo_id: int) -> Optional[Dict]:
     """Función de conveniencia para obtener un préstamo"""
     manager = PrestamoManager()
     return manager.obtener_prestamo(prestamo_id)
 
-def calcular_cuota_mensual(monto: float, tasa_interes: float, plazo_meses: int) -> float:
+def calcular_cuota_mensual(monto: float, quincenas: int) -> float:
     """Función de conveniencia para calcular cuota mensual"""
     manager = PrestamoManager()
-    return manager.calcular_cuota_mensual(monto, tasa_interes, plazo_meses)
+    return manager.calcular_cuota_mensual(monto, quincenas)
 
 # ============================================================================
 # INTERFAZ GRÁFICA - PRESTAMOSWINDOW
@@ -305,7 +480,7 @@ class PrestamoDialog:
         # Crear ventana de diálogo
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Editar Préstamo" if prestamo_data else "Nuevo Préstamo")
-        self.dialog.geometry("500x600")
+        self.dialog.geometry("500x700")
         self.dialog.resizable(False, False)
         self.dialog.transient(parent)
         self.dialog.grab_set()
@@ -346,29 +521,53 @@ class PrestamoDialog:
         self.monto_var = tk.StringVar()
         self.monto_entry = ttk.Entry(form_frame, textvariable=self.monto_var, width=30)
         self.monto_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0), pady=5)
+        ttk.Label(form_frame, text="(Mínimo $1,000)", font=('Arial', 8), foreground='gray').grid(row=1, column=2, sticky='w', padx=(5, 0))
         
-        # Tasa de interés
-        ttk.Label(form_frame, text="Tasa de Interés (%) *:").grid(row=2, column=0, sticky='w', pady=5)
-        self.tasa_var = tk.StringVar()
-        self.tasa_entry = ttk.Entry(form_frame, textvariable=self.tasa_var, width=30)
-        self.tasa_entry.grid(row=2, column=1, sticky='ew', padx=(10, 0), pady=5)
-        
-        # Plazo en quincenas
-        ttk.Label(form_frame, text="Plazo (quincenas) *:").grid(row=3, column=0, sticky='w', pady=5)
+        # Plazo en quincenas (combobox con opciones disponibles)
+        ttk.Label(form_frame, text="Quincenas *:").grid(row=2, column=0, sticky='w', pady=5)
         self.plazo_var = tk.StringVar()
-        self.plazo_entry = ttk.Entry(form_frame, textvariable=self.plazo_var, width=30)
-        self.plazo_entry.grid(row=3, column=1, sticky='ew', padx=(10, 0), pady=5)
+        self.plazo_combo = ttk.Combobox(form_frame, textvariable=self.plazo_var, width=27, state='readonly')
+        self.plazo_combo['values'] = QUINCENAS_DISPONIBLES
+        self.plazo_combo.grid(row=2, column=1, sticky='ew', padx=(10, 0), pady=5)
+        if not self.prestamo_data:
+            self.plazo_combo.current(0)  # Seleccionar primera opción por defecto
+        
+        # Tasa de interés (oculto, se calcula automáticamente)
+        self.tasa_var = tk.StringVar(value="0")
         
         # Fecha de inicio
-        ttk.Label(form_frame, text="Fecha de Inicio:").grid(row=4, column=0, sticky='w', pady=5)
+        ttk.Label(form_frame, text="Fecha de Inicio:").grid(row=3, column=0, sticky='w', pady=5)
         self.fecha_var = tk.StringVar(value=date.today().strftime('%Y-%m-%d'))
         self.fecha_entry = ttk.Entry(form_frame, textvariable=self.fecha_var, width=30)
-        self.fecha_entry.grid(row=4, column=1, sticky='ew', padx=(10, 0), pady=5)
+        self.fecha_entry.grid(row=3, column=1, sticky='ew', padx=(10, 0), pady=5)
+        
+        # Fecha del primer pago
+        ttk.Label(form_frame, text="Primer Pago *:").grid(row=4, column=0, sticky='w', pady=5)
+        self.primer_pago_var = tk.StringVar()
+        self.primer_pago_combo = ttk.Combobox(form_frame, textvariable=self.primer_pago_var, width=27, state='readonly')
+        self.primer_pago_combo.grid(row=4, column=1, sticky='ew', padx=(10, 0), pady=5)
+        
+        # Actualizar opciones cuando cambie la fecha de inicio
+        self.fecha_var.trace('w', lambda *args: self.actualizar_opciones_primer_pago())
+        
+        # Seguro
+        self.tiene_seguro_var = tk.BooleanVar(value=False)
+        self.seguro_check = ttk.Checkbutton(form_frame, text="Incluir seguro de $15", 
+                                            variable=self.tiene_seguro_var,
+                                            command=self.toggle_beneficiario)
+        self.seguro_check.grid(row=5, column=1, sticky='w', padx=(10, 0), pady=5)
+        
+        # Beneficiario
+        ttk.Label(form_frame, text="Beneficiario:").grid(row=6, column=0, sticky='w', pady=5)
+        self.beneficiario_var = tk.StringVar()
+        self.beneficiario_entry = ttk.Entry(form_frame, textvariable=self.beneficiario_var, width=30, state='disabled')
+        self.beneficiario_entry.grid(row=6, column=1, sticky='ew', padx=(10, 0), pady=5)
+        ttk.Label(form_frame, text="(Solo si incluye seguro)", font=('Arial', 8), foreground='gray').grid(row=6, column=2, sticky='w', padx=(5, 0))
         
         # Detalles
-        ttk.Label(form_frame, text="Detalles:").grid(row=5, column=0, sticky='w', pady=5)
+        ttk.Label(form_frame, text="Detalles:").grid(row=7, column=0, sticky='w', pady=5)
         self.detalles_text = tk.Text(form_frame, height=4, width=30)
-        self.detalles_text.grid(row=5, column=1, sticky='ew', padx=(10, 0), pady=5)
+        self.detalles_text.grid(row=7, column=1, sticky='ew', padx=(10, 0), pady=5)
         
         # Configurar expansión de columnas
         form_frame.columnconfigure(1, weight=1)
@@ -394,10 +593,99 @@ class PrestamoDialog:
         
         # Bind eventos
         self.monto_var.trace('w', lambda *args: self.calcular_preview())
-        self.tasa_var.trace('w', lambda *args: self.calcular_preview())
         self.plazo_var.trace('w', lambda *args: self.calcular_preview())
+        self.tiene_seguro_var.trace('w', lambda *args: self.calcular_preview())
         self.dialog.bind('<Return>', lambda e: self.guardar())
         self.dialog.bind('<Escape>', lambda e: self.cancelar())
+        
+        # Inicializar opciones de primer pago
+        self.actualizar_opciones_primer_pago()
+    
+    def actualizar_opciones_primer_pago(self):
+        """Actualizar opciones de fecha del primer pago basándose en la fecha de inicio"""
+        try:
+            fecha_str = self.fecha_var.get()
+            if not fecha_str:
+                return
+            
+            fecha_inicio = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            hoy = date.today()
+            
+            # Calcular las opciones de primer pago (15 o 30)
+            opciones = []
+            
+            # Obtener año y mes de la fecha de inicio
+            año = fecha_inicio.year
+            mes = fecha_inicio.month
+            dia = fecha_inicio.day
+            
+            # Calcular fecha del 15 y 30 del mes actual
+            fecha_15_actual = date(año, mes, 15)
+            fecha_30_actual = date(año, mes, 30)
+            
+            # Calcular fecha del 15 y 30 del mes siguiente
+            if mes == 12:
+                fecha_15_siguiente = date(año + 1, 1, 15)
+                fecha_30_siguiente = date(año + 1, 1, 30)
+            else:
+                fecha_15_siguiente = date(año, mes + 1, 15)
+                fecha_30_siguiente = date(año, mes + 1, 30)
+            
+            # Meses en español
+            meses_es = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+                       'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+            
+            # Si la fecha de inicio es antes del 15, puede pagar el 15 o 30 del mismo mes
+            if dia < 15:
+                if fecha_15_actual >= hoy:
+                    mes_nombre = meses_es[fecha_15_actual.month - 1]
+                    opciones.append(f"{fecha_15_actual.strftime('%Y-%m-%d')} (15 de {mes_nombre})")
+                if fecha_30_actual >= hoy:
+                    mes_nombre = meses_es[fecha_30_actual.month - 1]
+                    opciones.append(f"{fecha_30_actual.strftime('%Y-%m-%d')} (30 de {mes_nombre})")
+                # También puede pagar el 15 del mes siguiente
+                if fecha_15_siguiente >= hoy:
+                    mes_nombre = meses_es[fecha_15_siguiente.month - 1]
+                    opciones.append(f"{fecha_15_siguiente.strftime('%Y-%m-%d')} (15 de {mes_nombre})")
+            # Si la fecha de inicio es entre el 15 y 30, puede pagar el 30 del mismo mes o 15 del siguiente
+            elif dia < 30:
+                if fecha_30_actual >= hoy:
+                    mes_nombre = meses_es[fecha_30_actual.month - 1]
+                    opciones.append(f"{fecha_30_actual.strftime('%Y-%m-%d')} (30 de {mes_nombre})")
+                if fecha_15_siguiente >= hoy:
+                    mes_nombre = meses_es[fecha_15_siguiente.month - 1]
+                    opciones.append(f"{fecha_15_siguiente.strftime('%Y-%m-%d')} (15 de {mes_nombre})")
+            # Si la fecha de inicio es el 30 o después, solo puede pagar el 15 del mes siguiente
+            else:
+                if fecha_15_siguiente >= hoy:
+                    mes_nombre = meses_es[fecha_15_siguiente.month - 1]
+                    opciones.append(f"{fecha_15_siguiente.strftime('%Y-%m-%d')} (15 de {mes_nombre})")
+                if fecha_30_siguiente >= hoy:
+                    mes_nombre = meses_es[fecha_30_siguiente.month - 1]
+                    opciones.append(f"{fecha_30_siguiente.strftime('%Y-%m-%d')} (30 de {mes_nombre})")
+            
+            # Si no hay opciones válidas, agregar al menos el 15 del mes siguiente
+            if not opciones:
+                meses_es = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+                           'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+                mes_nombre = meses_es[fecha_15_siguiente.month - 1]
+                opciones.append(f"{fecha_15_siguiente.strftime('%Y-%m-%d')} (15 de {mes_nombre})")
+            
+            self.primer_pago_combo['values'] = opciones
+            if opciones and not self.prestamo_data:
+                self.primer_pago_combo.current(0)  # Seleccionar primera opción por defecto
+                
+        except (ValueError, AttributeError):
+            # Si hay error en el formato de fecha, no hacer nada
+            pass
+    
+    def toggle_beneficiario(self):
+        """Habilitar/deshabilitar campo de beneficiario según el checkbox de seguro"""
+        if self.tiene_seguro_var.get():
+            self.beneficiario_entry.config(state='normal')
+        else:
+            self.beneficiario_entry.config(state='disabled')
+            self.beneficiario_var.set("")
     
     def cargar_datos(self):
         """Cargar datos existentes si es edición"""
@@ -409,61 +697,87 @@ class PrestamoDialog:
                     break
             
             self.monto_var.set(str(self.prestamo_data['monto']))
-            self.tasa_var.set(str(self.prestamo_data['tasa_interes']))
             self.plazo_var.set(str(self.prestamo_data['plazo_quincenas']))
             self.fecha_var.set(self.prestamo_data['fecha_inicio'])
             self.detalles_text.insert('1.0', self.prestamo_data.get('detalles', ''))
+            
+            # Cargar seguro y beneficiario si existen
+            tiene_seguro = self.prestamo_data.get('tiene_seguro', False)
+            self.tiene_seguro_var.set(tiene_seguro)
+            if tiene_seguro:
+                self.beneficiario_entry.config(state='normal')
+                beneficiario = self.prestamo_data.get('beneficiario', '')
+                self.beneficiario_var.set(beneficiario)
+            
+            # Cargar fecha del primer pago si existe
+            if 'fecha_primer_pago' in self.prestamo_data:
+                fecha_primer_pago = self.prestamo_data['fecha_primer_pago']
+                # Buscar en las opciones y seleccionar
+                self.actualizar_opciones_primer_pago()
+                for i, opcion in enumerate(self.primer_pago_combo['values']):
+                    if opcion.startswith(fecha_primer_pago):
+                        self.primer_pago_combo.current(i)
+                        break
     
     def calcular_preview(self):
-        """Calcular vista previa de los pagos"""
+        """Calcular vista previa de los pagos usando la matriz de tarifas"""
         try:
-            monto = float(self.monto_var.get() or 0)
-            tasa = float(self.tasa_var.get() or 0)
-            plazo = int(self.plazo_var.get() or 0)
+            monto_str = self.monto_var.get().strip()
+            plazo_str = self.plazo_var.get().strip()
             
-            if monto > 0 and tasa >= 0 and plazo > 0:
-                # Convertir plazo de quincenas a meses
-                plazo_meses = plazo / 2
-                
-                # Calcular cuota mensual
-                tasa_mensual = tasa / 12 / 100
-                if tasa_mensual == 0:
-                    cuota_mensual = monto / plazo_meses
-                else:
-                    cuota_mensual = monto * (tasa_mensual * (1 + tasa_mensual) ** plazo_meses) / ((1 + tasa_mensual) ** plazo_meses - 1)
-                
-                # Calcular cuota quincenal
-                cuota_quincenal = cuota_mensual / 2
-                
-                # Calcular total a pagar
-                total_pagar = cuota_mensual * plazo_meses
-                total_interes = total_pagar - monto
-                
-                preview = f"""📊 RESUMEN DEL PRÉSTAMO
+            if not monto_str or not plazo_str:
+                self.preview_text.config(state='normal')
+                self.preview_text.delete('1.0', tk.END)
+                self.preview_text.insert('1.0', "Ingresa monto y quincenas para ver el cálculo")
+                self.preview_text.config(state='disabled')
+                return
+            
+            monto = float(monto_str)
+            quincenas = int(plazo_str)
+            
+            # Validar
+            es_valido, mensaje = validar_monto_y_quincenas(monto, quincenas)
+            if not es_valido:
+                self.preview_text.config(state='normal')
+                self.preview_text.delete('1.0', tk.END)
+                self.preview_text.insert('1.0', f"Error: {mensaje}")
+                self.preview_text.config(state='disabled')
+                return
+            
+            # Obtener si tiene seguro
+            tiene_seguro = self.tiene_seguro_var.get()
+            
+            # Calcular usando la matriz de tarifas
+            cuota_base = obtener_cuota_quincenal(monto, quincenas)
+            cuota_quincenal = cuota_base + (15.0 if tiene_seguro else 0.0)
+            cuota_mensual = cuota_quincenal * 2
+            total_pagar = calcular_total_pagar(monto, quincenas) + (15.0 * quincenas if tiene_seguro else 0.0)
+            total_interes = calcular_interes_total(monto, quincenas) + (15.0 * quincenas if tiene_seguro else 0.0)
+            plazo_meses = quincenas / 2
+            
+            seguro_text = f"\n   • Seguro: ${15.0 * quincenas:,.2f} (${15.0:.2f} por quincena)" if tiene_seguro else ""
+            
+            preview = f"""RESUMEN DEL PRESTAMO
 
-💰 Monto solicitado: ${monto:,.2f}
-📅 Plazo: {plazo} quincenas ({plazo_meses:.1f} meses)
-📈 Tasa de interés: {tasa}% anual
+Monto solicitado: ${monto:,.2f}
+Plazo: {quincenas} quincenas ({plazo_meses:.1f} meses)
+Seguro: {"Sí ($15 por quincena)" if tiene_seguro else "No"}
 
-💳 CUOTAS:
+CUOTAS:
+   • Cuota quincenal base: ${cuota_base:,.2f}{" + $15.00 seguro" if tiene_seguro else ""}
+   • Cuota quincenal total: ${cuota_quincenal:,.2f}
    • Cuota mensual: ${cuota_mensual:,.2f}
-   • Cuota quincenal: ${cuota_quincenal:,.2f}
 
-📋 TOTALES:
-   • Total a pagar: ${total_pagar:,.2f}
+TOTALES:
+   • Total a pagar: ${total_pagar:,.2f}{seguro_text}
    • Total intereses: ${total_interes:,.2f}"""
+            
+            self.preview_text.config(state='normal')
+            self.preview_text.delete('1.0', tk.END)
+            self.preview_text.insert('1.0', preview)
+            self.preview_text.config(state='disabled')
                 
-                self.preview_text.config(state='normal')
-                self.preview_text.delete('1.0', tk.END)
-                self.preview_text.insert('1.0', preview)
-                self.preview_text.config(state='disabled')
-            else:
-                self.preview_text.config(state='normal')
-                self.preview_text.delete('1.0', tk.END)
-                self.preview_text.insert('1.0', "Ingresa los datos para ver el cálculo")
-                self.preview_text.config(state='disabled')
-                
-        except ValueError:
+        except ValueError as e:
             self.preview_text.config(state='normal')
             self.preview_text.delete('1.0', tk.END)
             self.preview_text.insert('1.0', "Datos inválidos")
@@ -485,18 +799,37 @@ class PrestamoDialog:
             
             # Obtener valores validados
             monto = float(self.monto_var.get())
-            tasa = float(self.tasa_var.get())
-            plazo = int(self.plazo_var.get())
+            quincenas = int(self.plazo_var.get())
             fecha = self.fecha_var.get()
+            primer_pago_str = self.primer_pago_var.get()
             detalles = self.detalles_text.get('1.0', tk.END).strip()
+            tiene_seguro = self.tiene_seguro_var.get()
+            beneficiario = self.beneficiario_var.get().strip() if tiene_seguro else None
+            
+            # Extraer fecha del primer pago del string (formato: "YYYY-MM-DD (descripción)")
+            fecha_primer_pago = primer_pago_str.split(' ')[0] if primer_pago_str else None
+            
+            # Validar monto y quincenas
+            es_valido, mensaje = validar_monto_y_quincenas(monto, quincenas)
+            if not es_valido:
+                messagebox.showerror("Error", mensaje, parent=self.dialog)
+                return
+            
+            # Validar que si tiene seguro, debe tener beneficiario
+            if tiene_seguro and not beneficiario:
+                messagebox.showerror("Error", "Si incluye seguro, debe especificar un beneficiario", parent=self.dialog)
+                self.beneficiario_entry.focus()
+                return
             
             self.result = {
                 'cliente_id': cliente_id,
                 'monto': monto,
-                'tasa_interes': tasa,
-                'plazo_quincenas': plazo,
+                'quincenas': quincenas,
                 'fecha_inicio': fecha,
-                'detalles': detalles
+                'fecha_primer_pago': fecha_primer_pago,
+                'detalles': detalles,
+                'tiene_seguro': tiene_seguro,
+                'beneficiario': beneficiario
             }
             
             self.dialog.destroy()
@@ -573,6 +906,13 @@ class PrestamoDialog:
         except ValueError:
             messagebox.showerror("Error", "Formato de fecha inválido (YYYY-MM-DD)", parent=self.dialog)
             self.fecha_entry.focus()
+            return False
+        
+        # Validar fecha del primer pago
+        primer_pago = self.primer_pago_var.get()
+        if not primer_pago:
+            messagebox.showerror("Error", "Debes seleccionar la fecha del primer pago", parent=self.dialog)
+            self.primer_pago_combo.focus()
             return False
         
         return True
@@ -665,6 +1005,7 @@ class PrestamosWindow(ttk.Frame):
         ttk.Button(button_frame, text="Nuevo Préstamo", command=self.nuevo_prestamo).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Editar Préstamo", command=self.editar_prestamo).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Ver Detalles", command=self.ver_detalles).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Cancelar", command=self.cancelar_prestamo).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Eliminar", command=self.eliminar_prestamo).pack(side='left', padx=5)
         
         # Frame para la tabla
@@ -672,14 +1013,14 @@ class PrestamosWindow(ttk.Frame):
         table_frame.pack(fill='both', expand=True)
         
         # Crear Treeview
-        columns = ('ID', 'Cliente', 'Monto', 'Tasa', 'Plazo', 'Fecha Inicio', 'Estado')
+        columns = ('ID', 'Cliente', 'Monto', 'Seguro', 'Plazo', 'Fecha Inicio', 'Estado')
         self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=15)
         
         # Configurar columnas
         self.tree.heading('ID', text='ID')
         self.tree.heading('Cliente', text='Cliente')
         self.tree.heading('Monto', text='Monto')
-        self.tree.heading('Tasa', text='Tasa %')
+        self.tree.heading('Seguro', text='Seguro')
         self.tree.heading('Plazo', text='Plazo')
         self.tree.heading('Fecha Inicio', text='Fecha Inicio')
         self.tree.heading('Estado', text='Estado')
@@ -687,7 +1028,7 @@ class PrestamosWindow(ttk.Frame):
         self.tree.column('ID', width=50, anchor='center')
         self.tree.column('Cliente', width=200)
         self.tree.column('Monto', width=100, anchor='e')
-        self.tree.column('Tasa', width=80, anchor='center')
+        self.tree.column('Seguro', width=80, anchor='center')
         self.tree.column('Plazo', width=80, anchor='center')
         self.tree.column('Fecha Inicio', width=100, anchor='center')
         self.tree.column('Estado', width=100, anchor='center')
@@ -716,11 +1057,12 @@ class PrestamosWindow(ttk.Frame):
             
             # Insertar en tabla
             for prestamo in prestamos:
+                seguro_text = "Sí ($15)" if prestamo.get('tiene_seguro', False) else "No"
                 self.tree.insert('', 'end', values=(
                     prestamo['id'],
                     prestamo['nombre_cliente'],
                     f"${prestamo['monto']:,.2f}",
-                    f"{prestamo['tasa_interes']}%",
+                    seguro_text,
                     f"{prestamo['plazo_quincenas']} quincenas",
                     prestamo['fecha_inicio'],
                     prestamo['estado']
@@ -752,11 +1094,12 @@ class PrestamosWindow(ttk.Frame):
             
             # Insertar en tabla
             for prestamo in prestamos:
+                seguro_text = "Sí ($15)" if prestamo.get('tiene_seguro', False) else "No"
                 self.tree.insert('', 'end', values=(
                     prestamo['id'],
                     prestamo['nombre_cliente'],
                     f"${prestamo['monto']:,.2f}",
-                    f"{prestamo['tasa_interes']}%",
+                    seguro_text,
                     f"{prestamo['plazo_quincenas']} quincenas",
                     prestamo['fecha_inicio'],
                     prestamo['estado']
@@ -793,10 +1136,12 @@ class PrestamosWindow(ttk.Frame):
                 self.controller.crear_prestamo(
                     datos['cliente_id'],
                     datos['monto'],
-                    datos['tasa_interes'],
-                    datos['plazo_quincenas'],
+                    datos['quincenas'],
                     datos['fecha_inicio'],
-                    datos['detalles']
+                    datos.get('fecha_primer_pago'),
+                    datos.get('detalles', ''),
+                    datos.get('tiene_seguro', False),
+                    datos.get('beneficiario')
                 )
                 messagebox.showinfo("Éxito", "Préstamo creado correctamente")
                 self.listar_prestamos()
@@ -853,17 +1198,32 @@ class PrestamosWindow(ttk.Frame):
             main_frame.pack(fill='both', expand=True)
             
             # Información del préstamo
-            info_text = f"""📋 INFORMACIÓN DEL PRÉSTAMO
+            tiene_seguro = prestamo.get('tiene_seguro', False)
+            cuota_quincenal = self.model.calcular_cuota_quincenal(prestamo['monto'], prestamo['plazo_quincenas'], tiene_seguro)
+            cuota_mensual = self.model.calcular_cuota_mensual(prestamo['monto'], prestamo['plazo_quincenas'], tiene_seguro)
+            total_pagar = calcular_total_pagar(prestamo['monto'], prestamo['plazo_quincenas']) + (15.0 * prestamo['plazo_quincenas'] if tiene_seguro else 0.0)
+            
+            # Información de seguro
+            seguro_info = ""
+            if prestamo.get('tiene_seguro', False):
+                beneficiario = prestamo.get('beneficiario', 'No especificado')
+                seguro_info = f"Seguro: Sí ($15)\nBeneficiario: {beneficiario}\n"
+            else:
+                seguro_info = "Seguro: No\n"
+            
+            info_text = f"""INFORMACION DEL PRESTAMO
 
-🆔 ID: {prestamo['id']}
-👤 Cliente: {prestamo['nombre_cliente']}
-💰 Monto: ${prestamo['monto']:,.2f}
-📈 Tasa de Interés: {prestamo['tasa_interes']}% anual
-📅 Plazo: {prestamo['plazo_quincenas']} quincenas ({prestamo['plazo_meses']:.1f} meses)
-📆 Fecha de Inicio: {prestamo['fecha_inicio']}
-📊 Estado: {prestamo['estado']}
+ID: {prestamo['id']}
+Cliente: {prestamo['nombre_cliente']}
+Monto: ${prestamo['monto']:,.2f}
+{seguro_info}Plazo: {prestamo['plazo_quincenas']} quincenas ({prestamo['plazo_meses']:.1f} meses)
+Fecha de Inicio: {prestamo['fecha_inicio']}
+Estado: {prestamo['estado']}
 
-💳 CUOTA MENSUAL: ${self.model.calcular_cuota_mensual(prestamo['monto'], prestamo['tasa_interes'], prestamo['plazo_meses']):,.2f}"""
+CUOTAS:
+   • Cuota quincenal: ${cuota_quincenal:,.2f}
+   • Cuota mensual: ${cuota_mensual:,.2f}
+   • Total a pagar: ${total_pagar:,.2f}"""
             
             ttk.Label(main_frame, text=info_text, font=('Arial', 12), justify='left').pack(pady=20)
             
@@ -873,29 +1233,94 @@ class PrestamosWindow(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Error", f"Error al mostrar detalles: {e}")
     
+    def cancelar_prestamo(self):
+        """Cancelar préstamo seleccionado (marcar como CANCELADO pero mantener registro)"""
+        if not self.prestamo_seleccionado:
+            messagebox.showwarning("Advertencia", "Selecciona un préstamo para cancelar")
+            return
+        
+        try:
+            prestamo_id = self.prestamo_seleccionado[0]
+            # Obtener datos completos del préstamo desde la base de datos
+            prestamo = self.controller.obtener_prestamo(prestamo_id)
+            
+            if not prestamo:
+                messagebox.showerror("Error", "No se pudo obtener la información del préstamo")
+                return
+            
+            cliente_nombre = prestamo['nombre_cliente']
+            monto = prestamo['monto']
+            estado_actual = prestamo['estado']
+            
+            if estado_actual == "CANCELADO":
+                messagebox.showinfo("Información", "Este préstamo ya está cancelado")
+                return
+            
+            # Confirmar cancelación
+            respuesta = messagebox.askyesno(
+                "Confirmar Cancelación",
+                f"¿Estás seguro de cancelar el préstamo #{prestamo_id}?\n\n"
+                f"Cliente: {cliente_nombre}\n"
+                f"Monto: ${monto:,.2f}\n\n"
+                f"El préstamo quedará marcado como CANCELADO pero se mantendrá en el registro."
+            )
+            
+            if respuesta:
+                self.controller.cancelar_prestamo(prestamo_id)
+                messagebox.showinfo("Éxito", "Préstamo cancelado correctamente")
+                self.listar_prestamos()
+        
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+    
     def eliminar_prestamo(self):
-        """Eliminar préstamo seleccionado"""
+        """Eliminar completamente el préstamo seleccionado de la base de datos"""
         if not self.prestamo_seleccionado:
             messagebox.showwarning("Advertencia", "Selecciona un préstamo para eliminar")
             return
         
         try:
             prestamo_id = self.prestamo_seleccionado[0]
-            cliente_nombre = self.prestamo_seleccionado[1]
-            monto = self.prestamo_seleccionado[2]
+            # Obtener datos completos del préstamo desde la base de datos
+            prestamo = self.controller.obtener_prestamo(prestamo_id)
+            
+            if not prestamo:
+                messagebox.showerror("Error", "No se pudo obtener la información del préstamo")
+                return
+            
+            cliente_nombre = prestamo['nombre_cliente']
+            monto = prestamo['monto']
+            
+            # Verificar si tiene pagos registrados
+            pagos = self.controller.verificar_pagos_prestamo(prestamo_id)
+            tiene_pagos = len(pagos) > 0
+            
+            if tiene_pagos:
+                mensaje = (
+                    f"ADVERTENCIA: Este préstamo tiene {len(pagos)} pago(s) registrado(s).\n\n"
+                    f"Cliente: {cliente_nombre}\n"
+                    f"Monto: ${monto:,.2f}\n\n"
+                    f"Si eliminas este préstamo, TODOS los pagos asociados también se eliminarán permanentemente.\n\n"
+                    f"¿Estás SEGURO de que quieres eliminar completamente este préstamo?"
+                )
+            else:
+                mensaje = (
+                    f"¿Estás seguro de eliminar COMPLETAMENTE el préstamo #{prestamo_id}?\n\n"
+                    f"Cliente: {cliente_nombre}\n"
+                    f"Monto: ${monto:,.2f}\n\n"
+                    f"Esta acción NO se puede deshacer. El préstamo será eliminado permanentemente."
+                )
             
             # Confirmar eliminación
             respuesta = messagebox.askyesno(
-                "Confirmar Eliminación",
-                f"¿Estás seguro de que quieres eliminar el préstamo?\n\n"
-                f"Cliente: {cliente_nombre}\n"
-                f"Monto: {monto}\n\n"
-                f"Esta acción no se puede deshacer."
+                "Confirmar Eliminación Completa",
+                mensaje,
+                icon='warning' if tiene_pagos else 'question'
             )
             
             if respuesta:
-                self.controller.eliminar_prestamo(prestamo_id)
-                messagebox.showinfo("Éxito", "Préstamo eliminado correctamente")
+                self.controller.eliminar_prestamo_completo(prestamo_id)
+                messagebox.showinfo("Éxito", "Préstamo eliminado completamente de la base de datos")
                 self.listar_prestamos()
         
         except Exception as e:
@@ -948,30 +1373,45 @@ class PrestamoController:
         """Obtener préstamo específico"""
         return self.model.obtener_prestamo(prestamo_id)
     
-    def crear_prestamo(self, cliente_id: int, monto: float, tasa_interes: float, 
-                      plazo_quincenas: int, fecha_inicio: str, detalles: str = '') -> int:
-        """Crear nuevo préstamo con validaciones"""
-        if monto <= 0:
-            raise ValueError("El monto debe ser mayor a 0")
+    def crear_prestamo(self, cliente_id: int, monto: float, quincenas: int, 
+                      fecha_inicio: str, fecha_primer_pago: str = None, 
+                      detalles: str = '', tiene_seguro: bool = False, 
+                      beneficiario: str = None) -> int:
+        """Crear nuevo préstamo con validaciones basado en matriz de tarifas"""
+        # Validar monto y quincenas
+        es_valido, mensaje = validar_monto_y_quincenas(monto, quincenas)
+        if not es_valido:
+            raise ValueError(mensaje)
         
-        if tasa_interes < 0:
-            raise ValueError("La tasa de interés no puede ser negativa")
-        
-        if plazo_quincenas <= 0:
-            raise ValueError("El plazo debe ser mayor a 0")
-        
-        # Convertir plazo de quincenas a meses
-        plazo_meses = plazo_quincenas / 2
-        
-        return self.model.crear_prestamo(cliente_id, monto, tasa_interes, plazo_meses, fecha_inicio)
+        return self.model.crear_prestamo(cliente_id, monto, quincenas, fecha_inicio, 
+                                        detalles=detalles, fecha_primer_pago=fecha_primer_pago,
+                                        tiene_seguro=tiene_seguro, beneficiario=beneficiario)
     
     def modificar_prestamo(self, prestamo_id: int, datos: Dict) -> bool:
         """Modificar préstamo con validaciones"""
         # TODO: Implementar modificación de préstamos
         raise NotImplementedError("La modificación de préstamos no está implementada aún")
     
-    def eliminar_prestamo(self, prestamo_id: int) -> bool:
-        """Eliminar préstamo con validaciones"""
-        # Verificar si el préstamo tiene pagos registrados
-        # TODO: Implementar verificación de pagos
+    def cancelar_prestamo(self, prestamo_id: int) -> bool:
+        """Cancelar préstamo (marcar como CANCELADO pero mantener registro)"""
         return self.model.actualizar_estado_prestamo(prestamo_id, 'CANCELADO')
+    
+    def eliminar_prestamo_completo(self, prestamo_id: int) -> bool:
+        """Eliminar completamente un préstamo de la base de datos"""
+        return self.model.eliminar_prestamo_completo(prestamo_id)
+    
+    def verificar_pagos_prestamo(self, prestamo_id: int) -> List[Dict]:
+        """Verificar si un préstamo tiene pagos registrados"""
+        try:
+            with self.model.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, fecha_pago, monto_capital + monto_interes + monto_seguro as total
+                    FROM pagos 
+                    WHERE prestamo_id = ?
+                    ORDER BY fecha_pago
+                ''', (prestamo_id,))
+                rows = cursor.fetchall()
+                return [{'id': row[0], 'fecha': row[1], 'total': row[2]} for row in rows]
+        except sqlite3.Error as e:
+            raise Exception(f"Error al verificar pagos: {e}")

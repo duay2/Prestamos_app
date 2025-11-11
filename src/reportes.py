@@ -9,11 +9,22 @@ from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Tuple
 from dateutil.relativedelta import relativedelta
 import math
+import os
+
+def get_db_path():
+    """Obtener la ruta absoluta de la base de datos"""
+    # Obtener el directorio base del proyecto (un nivel arriba de src)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_dir = os.path.join(base_dir, 'database')
+    db_path = os.path.join(db_dir, 'prestamos.db')
+    return db_path
 
 class ReporteManager:
     """Modelo para la gestión de reportes"""
     
-    def __init__(self, db_path: str = '../database/prestamos.db'):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = get_db_path()
         self.db_path = db_path
     
     def get_connection(self) -> sqlite3.Connection:

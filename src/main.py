@@ -5,10 +5,11 @@ Implementa la ventana principal con notebook de pestañas
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import sqlite3
 import sys
 import os
+import shutil
 from datetime import datetime
 
 # Importar módulos de la aplicación
@@ -52,27 +53,37 @@ class PrestamosApp:
     def setup_database(self):
         """Configurar y verificar la base de datos"""
         try:
-            # Asegurar que el directorio database existe
-            os.makedirs('../database', exist_ok=True)
+            # Obtener el directorio base del proyecto (un nivel arriba de src)
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            db_dir = os.path.join(base_dir, 'database')
+            db_path = os.path.join(db_dir, 'prestamos.db')
             
-            # Conectar a la base de datos
-            self.db_connection = sqlite3.connect('../database/prestamos.db')
+            # Asegurar que el directorio database existe
+            os.makedirs(db_dir, exist_ok=True)
+            
+            # Conectar a la base de datos usando ruta absoluta
+            self.db_connection = sqlite3.connect(db_path)
             
             # Verificar si las tablas existen
             self.verify_database_tables()
             
-            print("✅ Base de datos conectada correctamente")
+            print("[OK] Base de datos conectada correctamente")
             
         except Exception as e:
+            print(f"[ERROR] Error de base de datos: {e}")
             messagebox.showerror(
                 "Error de Base de Datos",
                 f"No se pudo conectar a la base de datos:\n{str(e)}\n\n"
                 "Asegúrate de ejecutar primero: python database/init_db.py"
             )
-            sys.exit(1)
+            # No cerrar la aplicación, continuar con error
+            self.db_connection = None
     
     def verify_database_tables(self):
         """Verificar que las tablas necesarias existan"""
+        if not self.db_connection:
+            raise Exception("No hay conexión a la base de datos")
+            
         cursor = self.db_connection.cursor()
         
         # Lista de tablas requeridas
@@ -80,11 +91,11 @@ class PrestamosApp:
         
         # Verificar cada tabla
         for table in required_tables:
-            cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
             if not cursor.fetchone():
                 raise Exception(f"La tabla '{table}' no existe en la base de datos")
         
-        print("✅ Todas las tablas verificadas correctamente")
+        print("[OK] Todas las tablas verificadas correctamente")
     
     def create_menu(self):
         """Crear menú principal de la aplicación"""
@@ -160,57 +171,57 @@ class PrestamosApp:
         """Crear pestaña de clientes"""
         try:
             self.clientes_window = ClientesWindow(self.notebook)
-            self.notebook.add(self.clientes_window, text="👥 Clientes")
-            print("✅ Pestaña de Clientes creada")
+            self.notebook.add(self.clientes_window, text="Clientes")
+            print("[OK] Pestaña de Clientes creada")
         except Exception as e:
-            print(f"❌ Error al crear pestaña de Clientes: {e}")
+            print(f"[ERROR] Error al crear pestaña de Clientes: {e}")
             # Crear pestaña de error
             error_frame = ttk.Frame(self.notebook)
             ttk.Label(error_frame, text=f"Error al cargar módulo de Clientes:\n{str(e)}", 
                      foreground='red').pack(pady=50)
-            self.notebook.add(error_frame, text="👥 Clientes")
+            self.notebook.add(error_frame, text="Clientes")
     
     def create_prestamos_tab(self):
         """Crear pestaña de préstamos"""
         try:
             self.prestamos_window = PrestamosWindow(self.notebook)
-            self.notebook.add(self.prestamos_window, text="💰 Préstamos")
-            print("✅ Pestaña de Préstamos creada")
+            self.notebook.add(self.prestamos_window, text="Prestamos")
+            print("[OK] Pestaña de Prestamos creada")
         except Exception as e:
-            print(f"❌ Error al crear pestaña de Préstamos: {e}")
+            print(f"[ERROR] Error al crear pestaña de Prestamos: {e}")
             # Crear pestaña de error
             error_frame = ttk.Frame(self.notebook)
-            ttk.Label(error_frame, text=f"Error al cargar módulo de Préstamos:\n{str(e)}", 
+            ttk.Label(error_frame, text=f"Error al cargar módulo de Prestamos:\n{str(e)}", 
                      foreground='red').pack(pady=50)
-            self.notebook.add(error_frame, text="💰 Préstamos")
+            self.notebook.add(error_frame, text="Prestamos")
     
     def create_pagos_tab(self):
         """Crear pestaña de pagos"""
         try:
             self.pagos_window = PagosWindow(self.notebook)
-            self.notebook.add(self.pagos_window, text="💳 Pagos")
-            print("✅ Pestaña de Pagos creada")
+            self.notebook.add(self.pagos_window, text="Pagos")
+            print("[OK] Pestaña de Pagos creada")
         except Exception as e:
-            print(f"❌ Error al crear pestaña de Pagos: {e}")
+            print(f"[ERROR] Error al crear pestaña de Pagos: {e}")
             # Crear pestaña de error
             error_frame = ttk.Frame(self.notebook)
             ttk.Label(error_frame, text=f"Error al cargar módulo de Pagos:\n{str(e)}", 
                      foreground='red').pack(pady=50)
-            self.notebook.add(error_frame, text="💳 Pagos")
+            self.notebook.add(error_frame, text="Pagos")
     
     def create_reportes_tab(self):
         """Crear pestaña de reportes"""
         try:
             self.reportes_window = ReportesWindow(self.notebook)
-            self.notebook.add(self.reportes_window, text="📊 Reportes")
-            print("✅ Pestaña de Reportes creada")
+            self.notebook.add(self.reportes_window, text="Reportes")
+            print("[OK] Pestaña de Reportes creada")
         except Exception as e:
-            print(f"❌ Error al crear pestaña de Reportes: {e}")
+            print(f"[ERROR] Error al crear pestaña de Reportes: {e}")
             # Crear pestaña de error
             error_frame = ttk.Frame(self.notebook)
             ttk.Label(error_frame, text=f"Error al cargar módulo de Reportes:\n{str(e)}", 
                      foreground='red').pack(pady=50)
-            self.notebook.add(error_frame, text="📊 Reportes")
+            self.notebook.add(error_frame, text="Reportes")
     
     def setup_bindings(self):
         """Configurar eventos de la aplicación"""
@@ -245,11 +256,11 @@ class PrestamosApp:
             cursor.execute("SELECT COUNT(*) FROM prestamos WHERE estado = 'ACTIVO'")
             num_prestamos_activos = cursor.fetchone()[0]
             
-            welcome_text = f"Bienvenido al Sistema de Gestión de Préstamos\n\n" \
-                          f"📊 Estado actual:\n" \
-                          f"   👥 Clientes registrados: {num_clientes}\n" \
-                          f"   💰 Préstamos activos: {num_prestamos_activos}\n\n" \
-                          f"💡 Consejo: Usa Ctrl+N para nuevo cliente, Ctrl+P para nuevo préstamo"
+            welcome_text = f"Bienvenido al Sistema de Gestion de Prestamos\n\n" \
+                          f"Estado actual:\n" \
+                          f"   Clientes registrados: {num_clientes}\n" \
+                          f"   Prestamos activos: {num_prestamos_activos}\n\n" \
+                          f"Consejo: Usa Ctrl+N para nuevo cliente, Ctrl+P para nuevo prestamo"
             
             self.status_bar.config(text=welcome_text)
             
@@ -289,11 +300,11 @@ class PrestamosApp:
             cursor.execute("SELECT SUM(monto_total) FROM prestamos WHERE estado = 'ACTIVO'")
             total_prestado = cursor.fetchone()[0] or 0
             
-            resumen = f"📊 RESUMEN GENERAL\n\n" \
-                     f"👥 Total de Clientes: {total_clientes}\n" \
-                     f"💰 Total de Préstamos: {total_prestamos}\n" \
-                     f"✅ Préstamos Activos: {prestamos_activos}\n" \
-                     f"💵 Monto Total Prestado: ${total_prestado:,.2f}"
+            resumen = f"RESUMEN GENERAL\n\n" \
+                     f"Total de Clientes: {total_clientes}\n" \
+                     f"Total de Prestamos: {total_prestamos}\n" \
+                     f"Prestamos Activos: {prestamos_activos}\n" \
+                     f"Monto Total Prestado: ${total_prestado:,.2f}"
             
             messagebox.showinfo("Resumen General", resumen)
             
@@ -398,51 +409,305 @@ class PrestamosApp:
     
     def respaldar_db(self):
         """Respaldar base de datos"""
-        messagebox.showinfo("Respaldar", "Función de respaldo en desarrollo")
+        try:
+            # Obtener ruta de la base de datos
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            db_dir = os.path.join(base_dir, 'database')
+            db_path = os.path.join(db_dir, 'prestamos.db')
+            
+            if not os.path.exists(db_path):
+                messagebox.showerror("Error", "No se encontró la base de datos")
+                return
+            
+            # Cerrar conexión activa si existe
+            if self.db_connection:
+                self.db_connection.close()
+                self.db_connection = None
+            
+            # Crear directorio de backups si no existe
+            backups_dir = os.path.join(base_dir, 'backups')
+            os.makedirs(backups_dir, exist_ok=True)
+            
+            # Generar nombre de archivo con fecha y hora
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_filename = f'prestamos_backup_{timestamp}.db'
+            default_backup_path = os.path.join(backups_dir, backup_filename)
+            
+            # Diálogo para seleccionar ubicación del backup
+            backup_path = filedialog.asksaveasfilename(
+                title="Guardar Respaldo de Base de Datos",
+                defaultextension=".db",
+                filetypes=[("Archivos de Base de Datos", "*.db"), ("Todos los archivos", "*.*")],
+                initialdir=backups_dir,
+                initialfile=backup_filename
+            )
+            
+            if not backup_path:
+                # Usuario canceló
+                # Reconectar a la base de datos
+                self.setup_database()
+                return
+            
+            # Copiar archivo de base de datos
+            shutil.copy2(db_path, backup_path)
+            
+            # Obtener tamaño del archivo
+            file_size = os.path.getsize(backup_path)
+            size_mb = file_size / (1024 * 1024)
+            
+            # Reconectar a la base de datos
+            self.setup_database()
+            
+            messagebox.showinfo(
+                "Respaldo Exitoso",
+                f"La base de datos se ha respaldado correctamente.\n\n"
+                f"Ubicación: {backup_path}\n"
+                f"Tamaño: {size_mb:.2f} MB\n"
+                f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            
+            print(f"[OK] Respaldo creado: {backup_path}")
+            
+        except Exception as e:
+            # Reconectar a la base de datos en caso de error
+            try:
+                self.setup_database()
+            except:
+                pass
+            
+            messagebox.showerror("Error", f"Error al respaldar la base de datos:\n{str(e)}")
+            print(f"[ERROR] Error al respaldar: {e}")
     
     def restaurar_db(self):
-        """Restaurar base de datos"""
-        messagebox.showinfo("Restaurar", "Función de restauración en desarrollo")
+        """Restaurar base de datos desde un backup"""
+        try:
+            # Confirmar restauración (operación peligrosa)
+            respuesta = messagebox.askyesno(
+                "Confirmar Restauración",
+                "ADVERTENCIA: Esta operación reemplazará la base de datos actual con el backup seleccionado.\n\n"
+                "Todos los datos actuales se perderán si no están en el backup.\n\n"
+                "¿Estás seguro de que quieres continuar?",
+                icon='warning'
+            )
+            
+            if not respuesta:
+                return
+            
+            # Obtener ruta de la base de datos actual
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            db_dir = os.path.join(base_dir, 'database')
+            db_path = os.path.join(db_dir, 'prestamos.db')
+            
+            # Diálogo para seleccionar archivo de backup
+            backup_path = filedialog.askopenfilename(
+                title="Seleccionar Archivo de Respaldo",
+                filetypes=[("Archivos de Base de Datos", "*.db"), ("Todos los archivos", "*.*")],
+                initialdir=os.path.join(base_dir, 'backups')
+            )
+            
+            if not backup_path:
+                return
+            
+            if not os.path.exists(backup_path):
+                messagebox.showerror("Error", "El archivo de respaldo seleccionado no existe")
+                return
+            
+            # Verificar que el archivo sea válido (intentar conectarse)
+            try:
+                test_conn = sqlite3.connect(backup_path)
+                test_cursor = test_conn.cursor()
+                # Verificar que tenga las tablas necesarias
+                test_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('clientes', 'prestamos', 'pagos')")
+                tables = test_cursor.fetchall()
+                test_conn.close()
+                
+                if len(tables) < 3:
+                    messagebox.showerror(
+                        "Error",
+                        "El archivo de respaldo no parece ser válido.\n"
+                        "No contiene todas las tablas necesarias."
+                    )
+                    return
+            except sqlite3.Error as e:
+                messagebox.showerror("Error", f"El archivo de respaldo no es válido:\n{str(e)}")
+                return
+            
+            # Cerrar conexión activa
+            if self.db_connection:
+                self.db_connection.close()
+                self.db_connection = None
+            
+            # Crear backup de la base de datos actual antes de restaurar
+            if os.path.exists(db_path):
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_actual = os.path.join(db_dir, f'prestamos_antes_restauracion_{timestamp}.db')
+                shutil.copy2(db_path, backup_actual)
+                print(f"[INFO] Backup de BD actual guardado en: {backup_actual}")
+            
+            # Restaurar desde el backup
+            shutil.copy2(backup_path, db_path)
+            
+            # Reconectar a la base de datos
+            self.setup_database()
+            
+            # Obtener información del backup
+            backup_size = os.path.getsize(backup_path)
+            size_mb = backup_size / (1024 * 1024)
+            backup_date = datetime.fromtimestamp(os.path.getmtime(backup_path)).strftime('%Y-%m-%d %H:%M:%S')
+            
+            messagebox.showinfo(
+                "Restauración Exitosa",
+                f"La base de datos se ha restaurado correctamente desde el backup.\n\n"
+                f"Archivo restaurado: {os.path.basename(backup_path)}\n"
+                f"Tamaño: {size_mb:.2f} MB\n"
+                f"Fecha del backup: {backup_date}\n\n"
+                f"La aplicación se reiniciará para aplicar los cambios."
+            )
+            
+            print(f"[OK] Base de datos restaurada desde: {backup_path}")
+            
+            # Reiniciar aplicación
+            self.root.after(1000, self.reiniciar_aplicacion)
+            
+        except Exception as e:
+            # Reconectar a la base de datos en caso de error
+            try:
+                self.setup_database()
+            except:
+                pass
+            
+            messagebox.showerror("Error", f"Error al restaurar la base de datos:\n{str(e)}")
+            print(f"[ERROR] Error al restaurar: {e}")
+    
+    def reiniciar_aplicacion(self):
+        """Reiniciar la aplicación para aplicar cambios de restauración"""
+        try:
+            # Cerrar conexión
+            if self.db_connection:
+                self.db_connection.close()
+            
+            # Reiniciar
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo reiniciar la aplicación:\n{str(e)}")
+            print(f"[ERROR] Error al reiniciar: {e}")
     
     def mostrar_configuracion(self):
         """Mostrar ventana de configuración"""
-        messagebox.showinfo("Configuración", "Ventana de configuración en desarrollo")
+        try:
+            from src.config import cargar_configuracion, guardar_configuracion
+            
+            # Crear ventana de configuración
+            config_window = tk.Toplevel(self.root)
+            config_window.title("Configuración del Sistema")
+            config_window.geometry("500x300")
+            config_window.transient(self.root)
+            config_window.grab_set()
+            
+            # Centrar ventana
+            config_window.update_idletasks()
+            x = (config_window.winfo_screenwidth() // 2) - (config_window.winfo_width() // 2)
+            y = (config_window.winfo_screenheight() // 2) - (config_window.winfo_height() // 2)
+            config_window.geometry(f"+{x}+{y}")
+            
+            # Frame principal
+            main_frame = ttk.Frame(config_window, padding="20")
+            main_frame.pack(fill='both', expand=True)
+            
+            # Título
+            ttk.Label(main_frame, text="Configuración del Sistema", 
+                     font=('Arial', 14, 'bold')).pack(pady=(0, 20))
+            
+            # Cargar configuración actual
+            config = cargar_configuracion()
+            
+            # Frame para información del prestamista
+            prestamista_frame = ttk.LabelFrame(main_frame, text="Información del Prestamista", padding="10")
+            prestamista_frame.pack(fill='x', pady=10)
+            
+            # Nombre del prestamista
+            ttk.Label(prestamista_frame, text="Nombre del Prestamista:").grid(row=0, column=0, sticky='w', pady=5)
+            nombre_var = tk.StringVar(value=config.get('prestamista_nombre', ''))
+            nombre_entry = ttk.Entry(prestamista_frame, textvariable=nombre_var, width=30)
+            nombre_entry.grid(row=0, column=1, sticky='ew', padx=(10, 0), pady=5)
+            
+            # Teléfono
+            ttk.Label(prestamista_frame, text="Teléfono:").grid(row=1, column=0, sticky='w', pady=5)
+            telefono_var = tk.StringVar(value=config.get('prestamista_telefono', ''))
+            telefono_entry = ttk.Entry(prestamista_frame, textvariable=telefono_var, width=30)
+            telefono_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0), pady=5)
+            
+            # Dirección
+            ttk.Label(prestamista_frame, text="Dirección:").grid(row=2, column=0, sticky='w', pady=5)
+            direccion_var = tk.StringVar(value=config.get('prestamista_direccion', ''))
+            direccion_entry = ttk.Entry(prestamista_frame, textvariable=direccion_var, width=30)
+            direccion_entry.grid(row=2, column=1, sticky='ew', padx=(10, 0), pady=5)
+            
+            prestamista_frame.columnconfigure(1, weight=1)
+            
+            # Frame para botones
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill='x', pady=(20, 0))
+            
+            def guardar():
+                """Guardar configuración"""
+                try:
+                    nueva_config = {
+                        'prestamista_nombre': nombre_var.get(),
+                        'prestamista_telefono': telefono_var.get(),
+                        'prestamista_direccion': direccion_var.get()
+                    }
+                    guardar_configuracion(nueva_config)
+                    messagebox.showinfo("Éxito", "Configuración guardada correctamente", parent=config_window)
+                    config_window.destroy()
+                except Exception as e:
+                    messagebox.showerror("Error", f"Error al guardar configuración: {e}", parent=config_window)
+            
+            ttk.Button(button_frame, text="Guardar", command=guardar).pack(side='right', padx=(5, 0))
+            ttk.Button(button_frame, text="Cancelar", command=config_window.destroy).pack(side='right')
+            
+            # Enfocar en el campo de nombre
+            nombre_entry.focus()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al abrir configuración: {e}")
     
     def mostrar_manual(self):
         """Mostrar manual de usuario"""
         manual_text = """
-📖 MANUAL DE USUARIO - Sistema de Gestión de Préstamos
+MANUAL DE USUARIO - Sistema de Gestion de Prestamos
 
-🎯 FUNCIONES PRINCIPALES:
+FUNCIONES PRINCIPALES:
 
-👥 GESTIÓN DE CLIENTES:
+GESTION DE CLIENTES:
 • Agregar nuevos clientes
-• Editar información existente
-• Eliminar clientes (sin préstamos activos)
-• Buscar clientes por nombre o teléfono
+• Editar informacion existente
+• Eliminar clientes (sin prestamos activos)
+• Buscar clientes por nombre o telefono
 
-💰 GESTIÓN DE PRÉSTAMOS:
-• Crear nuevos préstamos
-• Ver préstamos activos
+GESTION DE PRESTAMOS:
+• Crear nuevos prestamos
+• Ver prestamos activos
 • Calcular cuotas
-• Generar tablas de amortización
+• Generar tablas de amortizacion
 
-💳 GESTIÓN DE PAGOS:
+GESTION DE PAGOS:
 • Registrar pagos
 • Ver historial de pagos
 • Generar recibos
 • Reportes de cobranza
 
-⌨️ ATAJOS DE TECLADO:
+ATAJOS DE TECLADO:
 • Ctrl+N: Nuevo cliente
-• Ctrl+P: Nuevo préstamo
+• Ctrl+P: Nuevo prestamo
 • Ctrl+Q: Salir
 • F1: Manual de usuario
 • F5: Actualizar vista actual
 
-📊 REPORTES DISPONIBLES:
+REPORTES DISPONIBLES:
 • Resumen general
-• Préstamos activos
+• Prestamos activos
 • Pagos del mes
         """
         messagebox.showinfo("Manual de Usuario", manual_text)
@@ -450,23 +715,23 @@ class PrestamosApp:
     def mostrar_acerca_de(self):
         """Mostrar información de la aplicación"""
         about_text = """
-🏦 Sistema de Gestión de Préstamos
-Versión 1.0.0
+Sistema de Gestion de Prestamos
+Version 1.0.0
 
 Desarrollado con Python y Tkinter
 
-Características:
-• Gestión completa de clientes
-• Administración de préstamos
+Caracteristicas:
+• Gestion completa de clientes
+• Administracion de prestamos
 • Control de pagos
-• Reportes y estadísticas
+• Reportes y estadisticas
 • Interfaz intuitiva
 
-Tecnologías utilizadas:
+Tecnologias utilizadas:
 • Python 3.x
 • Tkinter (GUI)
 • SQLite (Base de datos)
-• FPDF (Generación de PDFs)
+• FPDF (Generacion de PDFs)
 
 © 2024 - Todos los derechos reservados
         """
@@ -489,14 +754,14 @@ Tecnologías utilizadas:
                 # Cerrar conexión de base de datos
                 if self.db_connection:
                     self.db_connection.close()
-                    print("✅ Conexión de base de datos cerrada")
+                    print("[OK] Conexion de base de datos cerrada")
                 
                 # Destruir ventana principal
                 self.root.destroy()
-                print("✅ Aplicación cerrada correctamente")
+                print("[OK] Aplicacion cerrada correctamente")
                 
         except Exception as e:
-            print(f"❌ Error al cerrar aplicación: {e}")
+            print(f"[ERROR] Error al cerrar aplicacion: {e}")
             self.root.destroy()
 
 def main():
@@ -523,14 +788,14 @@ def main():
         y = (root.winfo_screenheight() // 2) - (height // 2)
         root.geometry(f'{width}x{height}+{x}+{y}')
         
-        print("🚀 Aplicación iniciada correctamente")
-        print("💡 Usa Ctrl+N para nuevo cliente, Ctrl+P para nuevo préstamo")
+        print("[OK] Aplicacion iniciada correctamente")
+        print("[INFO] Usa Ctrl+N para nuevo cliente, Ctrl+P para nuevo prestamo")
         
         # Iniciar loop principal
         root.mainloop()
         
     except Exception as e:
-        print(f"❌ Error al iniciar la aplicación: {e}")
+        print(f"[ERROR] Error al iniciar la aplicacion: {e}")
         messagebox.showerror("Error Fatal", f"Error al iniciar la aplicación:\n{str(e)}")
         sys.exit(1)
 

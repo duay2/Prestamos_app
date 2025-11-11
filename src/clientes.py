@@ -9,11 +9,22 @@ from tkinter import ttk, messagebox
 import sqlite3
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
+import os
+
+def get_db_path():
+    """Obtener la ruta absoluta de la base de datos"""
+    # Obtener el directorio base del proyecto (un nivel arriba de src)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_dir = os.path.join(base_dir, 'database')
+    db_path = os.path.join(db_dir, 'prestamos.db')
+    return db_path
 
 class ClienteModel:
     """Modelo para la gestión de datos de clientes"""
     
-    def __init__(self, db_path: str = '../database/prestamos.db'):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = get_db_path()
         self.db_path = db_path
     
     def get_connection(self) -> sqlite3.Connection:
@@ -22,18 +33,26 @@ class ClienteModel:
     
     def listar_clientes(self) -> List[Tuple]:
         """
-        Obtener lista de todos los clientes
+        Obtener lista de todos los clientes con información de préstamos activos
         
         Returns:
-            Lista de tuplas con los datos de los clientes
+            Lista de tuplas con los datos de los clientes incluyendo préstamos activos
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, nombre, telefono, direccion, fecha_registro
-                    FROM clientes 
-                    ORDER BY nombre
+                    SELECT 
+                        c.id, 
+                        c.nombre, 
+                        c.telefono, 
+                        c.direccion, 
+                        c.fecha_registro,
+                        COALESCE(COUNT(CASE WHEN p.estado = 'ACTIVO' THEN 1 END), 0) as prestamos_activos
+                    FROM clientes c
+                    LEFT JOIN prestamos p ON c.id = p.cliente_id
+                    GROUP BY c.id, c.nombre, c.telefono, c.direccion, c.fecha_registro
+                    ORDER BY c.nombre
                 ''')
                 return cursor.fetchall()
         except sqlite3.Error as e:
@@ -71,16 +90,45 @@ class ClienteModel:
         
         Returns:
             ID del cliente creado
+        
+        Raises:
+            Exception: Si el cliente ya existe o hay un error de base de datos
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
+            # Verificar duplicados antes de insertar
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Verificar si ya existe un cliente con el mismo nombre (case-insensitive)
+            cursor.execute('''
+                SELECT id FROM clientes 
+                WHERE UPPER(TRIM(nombre)) = UPPER(TRIM(?))
+            ''', (nombre,))
+            if cursor.fetchone():
+                conn.close()
+                raise Exception(f"Ya existe un cliente con el nombre '{nombre}'")
+            
+            # Verificar si ya existe un cliente con el mismo teléfono (si se proporcionó)
+            if telefono and telefono.strip():
                 cursor.execute('''
-                    INSERT INTO clientes (nombre, telefono, direccion)
-                    VALUES (?, ?, ?)
-                ''', (nombre, telefono, direccion))
-                conn.commit()
-                return cursor.lastrowid
+                    SELECT id FROM clientes 
+                    WHERE TRIM(telefono) = TRIM(?)
+                ''', (telefono,))
+                if cursor.fetchone():
+                    conn.close()
+                    raise Exception(f"Ya existe un cliente con el teléfono '{telefono}'")
+            
+            # Insertar el nuevo cliente
+            cursor.execute('''
+                INSERT INTO clientes (nombre, telefono, direccion)
+                VALUES (?, ?, ?)
+            ''', (nombre.strip(), telefono.strip() if telefono else '', direccion.strip() if direccion else ''))
+            conn.commit()
+            cliente_id = cursor.lastrowid
+            conn.close()
+            return cliente_id
+        except sqlite3.IntegrityError as e:
+            raise Exception(f"Error: Ya existe un cliente con estos datos")
         except sqlite3.Error as e:
             raise Exception(f"Error al agregar cliente: {e}")
     
@@ -96,17 +144,44 @@ class ClienteModel:
         
         Returns:
             True si se actualizó correctamente
+        
+        Raises:
+            Exception: Si el nuevo nombre/teléfono ya existe en otro cliente
         """
         try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Verificar si el nuevo nombre ya existe en otro cliente
+            cursor.execute('''
+                SELECT id FROM clientes 
+                WHERE UPPER(TRIM(nombre)) = UPPER(TRIM(?)) AND id != ?
+            ''', (nombre, cliente_id))
+            if cursor.fetchone():
+                conn.close()
+                raise Exception(f"Ya existe otro cliente con el nombre '{nombre}'")
+            
+            # Verificar si el nuevo teléfono ya existe en otro cliente (si se proporcionó)
+            if telefono and telefono.strip():
                 cursor.execute('''
-                    UPDATE clientes 
-                    SET nombre = ?, telefono = ?, direccion = ?
-                    WHERE id = ?
-                ''', (nombre, telefono, direccion, cliente_id))
-                conn.commit()
-                return cursor.rowcount > 0
+                    SELECT id FROM clientes 
+                    WHERE TRIM(telefono) = TRIM(?) AND id != ?
+                ''', (telefono, cliente_id))
+                if cursor.fetchone():
+                    conn.close()
+                    raise Exception(f"Ya existe otro cliente con el teléfono '{telefono}'")
+            
+            # Actualizar el cliente
+            cursor.execute('''
+                UPDATE clientes 
+                SET nombre = ?, telefono = ?, direccion = ?
+                WHERE id = ?
+            ''', (nombre.strip(), telefono.strip() if telefono else '', direccion.strip() if direccion else '', cliente_id))
+            conn.commit()
+            conn.close()
+            return cursor.rowcount > 0
+        except sqlite3.IntegrityError as e:
+            raise Exception(f"Error: Ya existe un cliente con estos datos")
         except sqlite3.Error as e:
             raise Exception(f"Error al actualizar cliente: {e}")
     
@@ -141,22 +216,30 @@ class ClienteModel:
     
     def buscar_clientes(self, termino: str) -> List[Tuple]:
         """
-        Buscar clientes por término
+        Buscar clientes por término con información de préstamos activos
         
         Args:
             termino: Término de búsqueda
         
         Returns:
-            Lista de clientes que coinciden con la búsqueda
+            Lista de clientes que coinciden con la búsqueda incluyendo préstamos activos
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, nombre, telefono, direccion, fecha_registro
-                    FROM clientes 
-                    WHERE nombre LIKE ? OR telefono LIKE ?
-                    ORDER BY nombre
+                    SELECT 
+                        c.id, 
+                        c.nombre, 
+                        c.telefono, 
+                        c.direccion, 
+                        c.fecha_registro,
+                        COALESCE(COUNT(CASE WHEN p.estado = 'ACTIVO' THEN 1 END), 0) as prestamos_activos
+                    FROM clientes c
+                    LEFT JOIN prestamos p ON c.id = p.cliente_id
+                    WHERE c.nombre LIKE ? OR c.telefono LIKE ?
+                    GROUP BY c.id, c.nombre, c.telefono, c.direccion, c.fecha_registro
+                    ORDER BY c.nombre
                 ''', (f'%{termino}%', f'%{termino}%'))
                 return cursor.fetchall()
         except sqlite3.Error as e:
@@ -178,14 +261,66 @@ class ClienteModel:
                 cursor = conn.cursor()
                 
                 if tipo == "nombre":
-                    query = "SELECT id, nombre, telefono, direccion, fecha_registro FROM clientes WHERE nombre LIKE ? ORDER BY nombre"
+                    query = '''
+                        SELECT 
+                            c.id, 
+                            c.nombre, 
+                            c.telefono, 
+                            c.direccion, 
+                            c.fecha_registro,
+                            COALESCE(COUNT(CASE WHEN p.estado = 'ACTIVO' THEN 1 END), 0) as prestamos_activos
+                        FROM clientes c
+                        LEFT JOIN prestamos p ON c.id = p.cliente_id
+                        WHERE c.nombre LIKE ?
+                        GROUP BY c.id, c.nombre, c.telefono, c.direccion, c.fecha_registro
+                        ORDER BY c.nombre
+                    '''
                 elif tipo == "telefono":
-                    query = "SELECT id, nombre, telefono, direccion, fecha_registro FROM clientes WHERE telefono LIKE ? ORDER BY nombre"
+                    query = '''
+                        SELECT 
+                            c.id, 
+                            c.nombre, 
+                            c.telefono, 
+                            c.direccion, 
+                            c.fecha_registro,
+                            COALESCE(COUNT(CASE WHEN p.estado = 'ACTIVO' THEN 1 END), 0) as prestamos_activos
+                        FROM clientes c
+                        LEFT JOIN prestamos p ON c.id = p.cliente_id
+                        WHERE c.telefono LIKE ?
+                        GROUP BY c.id, c.nombre, c.telefono, c.direccion, c.fecha_registro
+                        ORDER BY c.nombre
+                    '''
                 elif tipo == "direccion":
-                    query = "SELECT id, nombre, telefono, direccion, fecha_registro FROM clientes WHERE direccion LIKE ? ORDER BY nombre"
+                    query = '''
+                        SELECT 
+                            c.id, 
+                            c.nombre, 
+                            c.telefono, 
+                            c.direccion, 
+                            c.fecha_registro,
+                            COALESCE(COUNT(CASE WHEN p.estado = 'ACTIVO' THEN 1 END), 0) as prestamos_activos
+                        FROM clientes c
+                        LEFT JOIN prestamos p ON c.id = p.cliente_id
+                        WHERE c.direccion LIKE ?
+                        GROUP BY c.id, c.nombre, c.telefono, c.direccion, c.fecha_registro
+                        ORDER BY c.nombre
+                    '''
                 else:
                     # Búsqueda general
-                    query = "SELECT id, nombre, telefono, direccion, fecha_registro FROM clientes WHERE nombre LIKE ? OR telefono LIKE ? OR direccion LIKE ? ORDER BY nombre"
+                    query = '''
+                        SELECT 
+                            c.id, 
+                            c.nombre, 
+                            c.telefono, 
+                            c.direccion, 
+                            c.fecha_registro,
+                            COALESCE(COUNT(CASE WHEN p.estado = 'ACTIVO' THEN 1 END), 0) as prestamos_activos
+                        FROM clientes c
+                        LEFT JOIN prestamos p ON c.id = p.cliente_id
+                        WHERE c.nombre LIKE ? OR c.telefono LIKE ? OR c.direccion LIKE ?
+                        GROUP BY c.id, c.nombre, c.telefono, c.direccion, c.fecha_registro
+                        ORDER BY c.nombre
+                    '''
                     cursor.execute(query, (f'%{termino}%', f'%{termino}%', f'%{termino}%'))
                     return cursor.fetchall()
                 
@@ -434,24 +569,35 @@ class ClienteDialog:
         return bool(re.match(patron, telefono))
     
     def verificar_duplicado(self, nombre: str, telefono: str) -> bool:
-        """Verificar si ya existe un cliente con los mismos datos"""
+        """Verificar si ya existe un cliente con los mismos datos (búsqueda exacta)"""
         try:
-            from src.clientes import ClienteModel
             model = ClienteModel()
+            conn = model.get_connection()
+            cursor = conn.cursor()
             
-            # Buscar por nombre
-            clientes = model.buscar_clientes(nombre)
-            if clientes:
+            # Buscar por nombre exacto (case-insensitive)
+            cursor.execute('''
+                SELECT id FROM clientes 
+                WHERE UPPER(TRIM(nombre)) = UPPER(TRIM(?))
+            ''', (nombre,))
+            if cursor.fetchone():
+                conn.close()
                 return True
             
-            # Buscar por teléfono (si se proporcionó)
-            if telefono:
-                clientes = model.buscar_clientes(telefono)
-                if clientes:
+            # Buscar por teléfono exacto (si se proporcionó y no está vacío)
+            if telefono and telefono.strip():
+                cursor.execute('''
+                    SELECT id FROM clientes 
+                    WHERE TRIM(telefono) = TRIM(?)
+                ''', (telefono,))
+                if cursor.fetchone():
+                    conn.close()
                     return True
             
+            conn.close()
             return False
-        except Exception:
+        except Exception as e:
+            print(f"Error al verificar duplicado: {e}")
             return False
     
     def cancelar(self):
@@ -529,7 +675,7 @@ class ClientesWindow(ttk.Frame):
         table_frame.pack(fill='both', expand=True)
         
         # Crear Treeview
-        columns = ('ID', 'Nombre', 'Teléfono', 'Dirección', 'Fecha Registro')
+        columns = ('ID', 'Nombre', 'Teléfono', 'Dirección', 'Fecha Registro', 'Préstamos Activos')
         self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=15)
         
         # Configurar columnas
@@ -538,12 +684,14 @@ class ClientesWindow(ttk.Frame):
         self.tree.heading('Teléfono', text='Teléfono')
         self.tree.heading('Dirección', text='Dirección')
         self.tree.heading('Fecha Registro', text='Fecha Registro')
+        self.tree.heading('Préstamos Activos', text='Préstamos Activos')
         
         self.tree.column('ID', width=50, anchor='center')
         self.tree.column('Nombre', width=200)
         self.tree.column('Teléfono', width=120)
-        self.tree.column('Dirección', width=250)
+        self.tree.column('Dirección', width=200)
         self.tree.column('Fecha Registro', width=120, anchor='center')
+        self.tree.column('Préstamos Activos', width=120, anchor='center')
         
         # Scrollbar
         scrollbar = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview)
@@ -662,38 +810,19 @@ class ClientesWindow(ttk.Frame):
         try:
             stats = self.controller.obtener_estadisticas()
             
-            stats_text = f"""📊 ESTADÍSTICAS DE CLIENTES
+            stats_text = f"""ESTADISTICAS DE CLIENTES
 
-👥 Total de clientes: {stats['total_clientes']}
-📅 Clientes registrados este mes: {stats['clientes_mes']}
-📞 Clientes con teléfono: {stats['con_telefono']}
-📍 Clientes con dirección: {stats['con_direccion']}
-📈 Promedio de préstamos por cliente: {stats['promedio_prestamos']:.1f}
-💰 Clientes con préstamos activos: {stats['con_prestamos_activos']}"""
+Total de clientes: {stats['total_clientes']}
+Clientes registrados este mes: {stats['clientes_mes']}
+Clientes con telefono: {stats['con_telefono']}
+Clientes con direccion: {stats['con_direccion']}
+Promedio de prestamos por cliente: {stats['promedio_prestamos']:.1f}
+Clientes con prestamos activos: {stats['con_prestamos_activos']}"""
             
             messagebox.showinfo("Estadísticas de Clientes", stats_text)
             
         except Exception as e:
             messagebox.showerror("Error", f"Error al obtener estadísticas: {e}")
-            return
-        
-        try:
-            # Limpiar tabla
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            
-            # Buscar clientes
-            clientes = self.controller.buscar_clientes(termino)
-            
-            # Insertar resultados
-            for cliente in clientes:
-                self.tree.insert('', 'end', values=cliente)
-            
-            # Actualizar estado
-            self.actualizar_estado()
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error al buscar clientes: {e}")
     
     def limpiar_busqueda(self):
         """Limpiar búsqueda y mostrar todos los clientes"""
