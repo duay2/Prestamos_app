@@ -1,0 +1,28 @@
+# Dependencias para el Sistema de Gestión de Préstamos
+# Base de datos
+# sqlite3 viene incluido con Python, no necesita instalación
+
+# Interfaz gráfica
+# tkinter viene incluido con Python, no necesita instalación
+
+# Manipulación de datos
+pandas>=1.5.0
+
+# Generación de PDFs
+fpdf>=1.7.2
+
+# Manejo de fechas
+python-dateutil>=2.8.2
+
+# Dependencias adicionales recomendadas
+# Para mejor manejo de fechas y cálculos financieros
+numpy>=1.21.0
+
+# Para exportación a Excel (opcional)
+openpyxl>=3.0.0
+
+# Para gráficos y reportes (opcional)
+matplotlib>=3.5.0
+
+# Para manipulación de imágenes (logo)
+Pillow>=9.0.0
